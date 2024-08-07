@@ -24,7 +24,7 @@ def get_reverse_complementary_sequence(seq):
 def count_haplotype(chrom, start, end, strand, bamfile, methy_dict, m6A_id_dict, snp_file_dict,base_minQ,read_minQ):
     # methy_dict 甲基化位点信息 pos0:methy_rate
     # m6A_id_dict 含有甲基化的read chrom_pos0_strand: read1;read2;...
-    # snp_file_dict snp位点信息 chrom_pos0: rsid;A1;A2;MAF
+    # snp_file_dict snp位点信息 chrom_pos0: rsid;A1;A2;EAF
     m6A_bases,snp_bases,snp_m6A_bases = {},{},{}
     # m6A_bases 存放目标区域中甲基化位点处所有的read id，这里同时包括甲基化的read和非甲基化的read，和m6A_id_dict联合使用
     # 后两个 XXX_bases[pos0]:{read1:"A",read2:"A",read3:"T"}
@@ -58,7 +58,7 @@ def count_haplotype(chrom, start, end, strand, bamfile, methy_dict, m6A_id_dict,
         "rsID","A1","A2",
         "A1_A","A2_A","A1_m6A","A2_m6A",
         "ism6A?","methy_rate",
-        "MAF"
+        "EAF"
         ])
     ith = 0
     bases_list = [snp_bases, snp_m6A_bases]
@@ -92,8 +92,8 @@ def start_get_haplotypes(chrom,strand,m6A_bases,snp_bases,m6A_id_dict,snp_file_d
             m6A_readid = set(m6A_id_dict[f"{chrom}_{m6A_pos}_{strand}"].split(";")) # 某个点只是甲基化的所有read
             res = get_haplotypes(snp_base, m6A_allreadid_list, m6A_readid, snp_file_dict[f"{chrom}_{snp_pos}"],strand)
             if res is not None:
-                a1,a2,a1_A,a2_A,a1_m6A,a2_m6A,snpID,maf = res
-                res_l.append([m6A_pos,snp_pos,a1,a2,a1_A,a2_A,a1_m6A,a2_m6A,snpID,maf])
+                a1,a2,a1_A,a2_A,a1_m6A,a2_m6A,snpID,eaf = res
+                res_l.append([m6A_pos,snp_pos,a1,a2,a1_A,a2_A,a1_m6A,a2_m6A,snpID,eaf])
     if len(res_l) != 0:
         return res_l
     else:
@@ -109,7 +109,7 @@ def get_haplotypes(snp_base, m6A_allreadid_list, m6A_readid,snp_file_dict_res,st
     # most_2base = [item[0] for item in Counter(list(snp_base.values())).most_common(2)]
     all_base = list(set(snp_base.values()))
     snpID = snp_file_dict_res.split(";")[0]
-    maf = float(snp_file_dict_res.split(";")[3])
+    eaf = float(snp_file_dict_res.split(";")[3])
     A1,A2 = snp_file_dict_res.split(";")[1],snp_file_dict_res.split(";")[2]
     a1,a2 = "",""
     if strand == "-":
@@ -128,7 +128,7 @@ def get_haplotypes(snp_base, m6A_allreadid_list, m6A_readid,snp_file_dict_res,st
     a2_A = len(a2_read & not_in_m6A_readid_set)
     a1_m6A = len(a1_read & in_m6A_readid_set)
     a2_m6A = len(a2_read & in_m6A_readid_set)
-    return a1,a2,a1_A,a2_A,a1_m6A,a2_m6A,snpID,maf
+    return a1,a2,a1_A,a2_A,a1_m6A,a2_m6A,snpID,eaf
 
 # fisher
 def simulate_fisher_exact_se(A1_A, A2_A, A1_m6A, A2_m6A, num_simulations=100):
@@ -208,11 +208,11 @@ if __name__ == "__main__":
     read_minQ = args.read_minQ-1 if args.read_minQ != 0 else 0
 
     snp_info = pd.read_csv(args.snp_info, sep="\t")
-    snp_info.columns = ["chrom","pos1","rsID","A1","A2","MAF"]
+    snp_info.columns = ["chrom","pos1","rsID","A1","A2","EAF"]
     snp_info["pos0"] = snp_info["pos1"].astype(int) - 1
     snp_info["k"] = snp_info["chrom"] + "_" + snp_info["pos0"].astype(str)
-    snp_info["v"] = snp_info["rsID"] + ";" + snp_info["A1"] + ";" + snp_info["A2"] + ";" + snp_info["MAF"].astype(str)
-    snp_dict = dict(zip(snp_info["k"], snp_info["v"])) # chrom_pos0: rsid;A1;A2;MAF
+    snp_info["v"] = snp_info["rsID"] + ";" + snp_info["A1"] + ";" + snp_info["A2"] + ";" + snp_info["EAF"].astype(str)
+    snp_dict = dict(zip(snp_info["k"], snp_info["v"])) # chrom_pos0: rsid;A1;A2;EAF
 
     ## 读甲基化位点文件并转化成字典
     methy_df = pd.read_csv(args.methy)
@@ -232,7 +232,7 @@ if __name__ == "__main__":
         "rsID","A1","A2",
         "A1_A","A2_A","A1_m6A","A2_m6A",
         "ism6A?","methy_rate",
-        "MAF"
+        "EAF"
         ])
 
     start,end = 0,int(geno_size_dict[args.chrom])

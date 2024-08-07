@@ -17,7 +17,7 @@ def get_reverse_complementary_sequence(seq):
 
 def count_haplotype(chrom, end, strand, bamfile, read_isoform_dict, snp_file_dict,threadsnum,base_minQ,read_minQ):
     # read_isoform_dict read对应的isoform read:isoform
-    # snp_file_dict snp位点信息 chrom_pos0: rsid;A1;A2;MAF
+    # snp_file_dict snp位点信息 chrom_pos0: rsid;A1;A2;EAF
     snp_bases = {}
     # snp_bases 存放的是snp位点 [pos0]:{read1:"A",read2:"A",read3:"T"}
     with pysam.AlignmentFile(bamfile, "rb",threads=threadsnum) as samfile:
@@ -41,7 +41,7 @@ def count_haplotype(chrom, end, strand, bamfile, read_isoform_dict, snp_file_dic
         "rsID","A1","A2",
         "A1_isoform_l","A2_isoform_l",
         "isoform_id_l",
-        "MAF",
+        "EAF",
         ])
     result = start_get_haplotypes(chrom, strand, snp_bases, read_isoform_dict, snp_file_dict)
     if result is None:
@@ -73,8 +73,8 @@ def start_get_haplotypes(chrom,strand,snp_bases,read_isoform_dict,snp_file_dict)
                 readid_base_isoform.append([base,read_isoform_dict[read]]) # 这里是某个snp处的read、base和isoform的对应情况，因为不需要知道具体的read是什么，只要知道base和isoform的对应关系就可以，所以放在list中
         res = get_haplotypes(readid_base_isoform, snp_file_dict[f"{chrom}_{snp_pos}"],strand)
         if res is not None:
-            a1,a2,A1_count_l,A2_count_l,all_isoform_type,snpID,maf = res
-            res_l.append([a1,a2,A1_count_l,A2_count_l,all_isoform_type,snpID,maf,snp_pos])
+            a1,a2,A1_count_l,A2_count_l,all_isoform_type,snpID,eaf = res
+            res_l.append([a1,a2,A1_count_l,A2_count_l,all_isoform_type,snpID,eaf,snp_pos])
     if len(res_l) != 0:
         return res_l
     else:
@@ -84,7 +84,7 @@ def get_haplotypes(readid_base_isoform,snp_file_dict_res,strand):
     if len(readid_base_isoform) == 0:
         return None
     snpID = snp_file_dict_res.split(";")[0]
-    maf = float(snp_file_dict_res.split(";")[3])
+    eaf = float(snp_file_dict_res.split(";")[3])
     all_base_list = list(i[0] for i in readid_base_isoform)
     all_isoform_type = list(set(i[1] for i in readid_base_isoform))
     A1,A2 = snp_file_dict_res.split(";")[1],snp_file_dict_res.split(";")[2]
@@ -110,7 +110,7 @@ def get_haplotypes(readid_base_isoform,snp_file_dict_res,strand):
     else:
         A2_count_l = [sum(1 for base_isoform in readid_base_isoform if base_isoform[0] == a2 and base_isoform[1] == isoform) for isoform in all_isoform_type]
         A1_count_l = [0 for _ in range(len(all_isoform_type))]
-    return a1,a2,A1_count_l,A2_count_l,all_isoform_type,snpID,maf
+    return a1,a2,A1_count_l,A2_count_l,all_isoform_type,snpID,eaf
 
 # fisher
 def simulate_fisher_exact_se(A1_isoform1, A2_isoform1, A1_isoform2, A2_isoform2, min_cov):
@@ -156,11 +156,11 @@ if __name__ == "__main__":
         read_isoform_dict = pickle.load(file) # readID: isoformID
 
     snp_info = pd.read_csv(args.snp_info, sep="\t")
-    snp_info.columns = ["chrom","pos1","rsID","A1","A2","MAF"]
+    snp_info.columns = ["chrom","pos1","rsID","A1","A2","EAF"]
     snp_info["pos0"] = snp_info["pos1"].astype(int) - 1
     snp_info["k"] = snp_info["chrom"] + "_" + snp_info["pos0"].astype(str)
-    snp_info["v"] = snp_info["rsID"] + ";" + snp_info["A1"] + ";" + snp_info["A2"] + ";" + snp_info["MAF"].astype(str)
-    snp_dict = dict(zip(snp_info["k"], snp_info["v"])) # chrom_pos0: rsid;A1;A2;MAF
+    snp_info["v"] = snp_info["rsID"] + ";" + snp_info["A1"] + ";" + snp_info["A2"] + ";" + snp_info["EAF"].astype(str)
+    snp_dict = dict(zip(snp_info["k"], snp_info["v"])) # chrom_pos0: rsid;A1;A2;EAF
 
     geno_size_df = pd.read_csv(args.geno_size, sep="\t", header=None, names=["chrom","size"])
     geno_size_dict = dict(zip(geno_size_df["chrom"], geno_size_df["size"]))
@@ -169,7 +169,7 @@ if __name__ == "__main__":
         "rsID","A1","A2",
         "A1_isoform_l","A2_isoform_l",
         "isoform_id_l",
-        "MAF",
+        "EAF",
         ])
     end = geno_size_dict[args.chrom]
     haplotype_df = pd.concat([haplotype_df, count_haplotype(args.chrom, end, args.strand, args.bam, read_isoform_dict, snp_dict, args.threads, base_minQ, read_minQ)],ignore_index=True)

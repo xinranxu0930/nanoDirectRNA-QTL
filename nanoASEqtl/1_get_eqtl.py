@@ -14,7 +14,7 @@ def get_reverse_complementary_sequence(seq):
     return finalseq
 
 def count_haplotype(chrom, end, strand, bamfile, snp_file_dict, threadsnum, base_minQ, read_minQ):
-    # snp_file_dict snp位点信息 chrom_pos0: rsid;A1;A2;MAF
+    # snp_file_dict snp位点信息 chrom_pos0: rsid;A1;A2;EAF
     snp_bases = {}
     # snp_bases 存放的是snp位点 [pos0]:{read1:"A",read2:"A",read3:"T"}
     with pysam.AlignmentFile(bamfile, "rb",threads=threadsnum) as samfile:
@@ -36,7 +36,7 @@ def count_haplotype(chrom, end, strand, bamfile, snp_file_dict, threadsnum, base
         "chrom","strand","snp_pos_1base",
         "rsID","A1","A2",
         "A1_num","A2_num",
-        "MAF",
+        "EAF",
         ])
     result = start_get_haplotypes(chrom, strand, snp_bases, snp_file_dict)
     if result is None:
@@ -55,7 +55,7 @@ def count_haplotype(chrom, end, strand, bamfile, snp_file_dict, threadsnum, base
         return haplotype_df
 
 def start_get_haplotypes(chrom,strand,snp_bases,snp_file_dict):
-    res_l = [] # 每一个元素都表示一个snp的结果 [a1,a2,A1_num,A2_num,snpID,maf,snp_pos]
+    res_l = [] # 每一个元素都表示一个snp的结果 [a1,a2,A1_num,A2_num,snpID,eaf,snp_pos]
     # snp_bases [pos0]:{read1:"A",read2:"A",read3:"T"}
     for snp_pos, snp_base in snp_bases.items():
         snp_base_count = {} # 统计每个snp处每个碱基的数量 {A:10,T:20}
@@ -68,8 +68,8 @@ def start_get_haplotypes(chrom,strand,snp_bases,snp_file_dict):
             continue
         res = get_haplotypes(snp_base_count, snp_file_dict[f"{chrom}_{snp_pos}"],strand)
         if res is not None:
-            a1,a2,A1_num,A2_num,snpID,maf = res
-            res_l.append([a1,a2,A1_num,A2_num,snpID,maf,snp_pos])
+            a1,a2,A1_num,A2_num,snpID,eaf = res
+            res_l.append([a1,a2,A1_num,A2_num,snpID,eaf,snp_pos])
     if len(res_l) != 0:
         return res_l
     else:
@@ -79,7 +79,7 @@ def get_haplotypes(snp_base_count,snp_file_dict_res,strand):
     snpID = snp_file_dict_res.split(";")[0]
     all_base = list(set(snp_base_count.keys()))
     A1,A2 = snp_file_dict_res.split(";")[1],snp_file_dict_res.split(";")[2]
-    maf = float(snp_file_dict_res.split(";")[3])
+    eaf = float(snp_file_dict_res.split(";")[3])
     a1,a2 = "",""
     if strand == "-":
         A1 = get_reverse_complementary_sequence(A1)
@@ -97,7 +97,7 @@ def get_haplotypes(snp_base_count,snp_file_dict_res,strand):
         A1_num,A2_num  = int(snp_base_count[a1]),0
     else:
         A1_num,A2_num  = 0,int(snp_base_count[a2])
-    return a1,a2,A1_num,A2_num,snpID,maf
+    return a1,a2,A1_num,A2_num,snpID,eaf
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Nanopore direct RNA data call ASE expression qtl.')
@@ -118,11 +118,11 @@ if __name__ == "__main__":
     output_path = f"{args.outdirpre}_haplotype_{args.chrom}_{args.strand}_tmp.csv"
 
     snp_info = pd.read_csv(args.snp_info, sep="\t")
-    snp_info.columns = ["chrom","pos1","rsID","A1","A2","MAF"]
+    snp_info.columns = ["chrom","pos1","rsID","A1","A2","EAF"]
     snp_info["pos0"] = snp_info["pos1"].astype(int) - 1
     snp_info["k"] = snp_info["chrom"] + "_" + snp_info["pos0"].astype(str)
-    snp_info["v"] = snp_info["rsID"] + ";" + snp_info["A1"] + ";" + snp_info["A2"] + ";" + snp_info["MAF"].astype(str)
-    snp_dict = dict(zip(snp_info["k"], snp_info["v"])) # chrom_pos0: rsid;A1;A2;MAF
+    snp_info["v"] = snp_info["rsID"] + ";" + snp_info["A1"] + ";" + snp_info["A2"] + ";" + snp_info["EAF"].astype(str)
+    snp_dict = dict(zip(snp_info["k"], snp_info["v"])) # chrom_pos0: rsid;A1;A2;EAF
 
     geno_size_df = pd.read_csv(args.geno_size, sep="\t", header=None, names=["chrom", "size"])
     end = geno_size_df.loc[geno_size_df['chrom'] == args.chrom, 'size'].iloc[0]
@@ -130,7 +130,7 @@ if __name__ == "__main__":
         "chrom","strand","snp_pos_1base",
         "rsID","A1","A2",
         "A1_num","A2_num",
-        "MAF",
+        "EAF",
         ])
 
     haplotype_df = pd.concat([haplotype_df, count_haplotype(args.chrom, end, args.strand, args.bam, snp_dict, args.threads,base_minQ,read_minQ)],ignore_index=True)
