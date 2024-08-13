@@ -165,27 +165,23 @@ def simulate_fisher_exact_se(A1_U, A2_U, A1_pseU, A2_pseU, num_simulations=100):
         sd = None
     return p_value, n, beta, sd
 
-def simulate_fisher_exact(A1_U, A2_U, A1_pseU, A2_pseU, min_cov):
-    p_value = None
-    beta = None
-    se_log_or = None
-    if (A1_U+A1_pseU >= min_cov) & (A2_U+A2_pseU >= min_cov):
-        A1_U += 0.75 if A1_U == 0 else 0
-        A2_U += 0.75 if A2_U == 0 else 0
-        A1_pseU += 0.75 if A1_pseU == 0 else 0
-        A2_pseU += 0.75 if A2_pseU == 0 else 0
-        observed = np.array([[A1_U, A2_U], [A1_pseU, A2_pseU]])
-        odds_ratio = (A1_U * A2_pseU) / (A2_U * A1_pseU)
-        se_log_or = np.sqrt(1/A1_U + 1/A2_pseU + 1/A2_U + 1/A1_pseU)
-        p_value = fisher_exact(observed)[1]
-        if np.isinf(odds_ratio) or odds_ratio == 0:
-            beta = None
-        else:
-            beta = np.log(odds_ratio)
+def simulate_fisher_exact(A1_U, A2_U, A1_pseU, A2_pseU):
+    A1_U += 0.75 if A1_U == 0 else 0
+    A2_U += 0.75 if A2_U == 0 else 0
+    A1_pseU += 0.75 if A1_pseU == 0 else 0
+    A2_pseU += 0.75 if A2_pseU == 0 else 0
+    observed = np.array([[A1_U, A2_U], [A1_pseU, A2_pseU]])
+    odds_ratio = (A1_U * A2_pseU) / (A2_U * A1_pseU)
+    se_log_or = np.sqrt(1/A1_U + 1/A2_pseU + 1/A2_U + 1/A1_pseU)
+    p_value = fisher_exact(observed)[1]
+    if np.isinf(odds_ratio) or odds_ratio == 0:
+        beta = None
+    else:
+        beta = np.log(odds_ratio)
     return p_value, beta, se_log_or
 
-def apply_simulate_fisher(row,min_cov):
-    return simulate_fisher_exact(row['A1_U'], row['A2_U'], row['A1_pseU'], row['A2_pseU'],min_cov)
+def apply_simulate_fisher(row):
+    return simulate_fisher_exact(row['A1_U'], row['A2_U'], row['A1_pseU'], row['A2_pseU'])
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Nanopore direct RNA data call pseUqtl.')
@@ -199,7 +195,6 @@ if __name__ == "__main__":
     parser.add_argument("--geno_size", type=str, help="genome size file path")
     parser.add_argument("--base_minQ", type=int, default=5, help="base min qscore(default=5)")
     parser.add_argument("--read_minQ", type=int, default=0, help="read min qscore(default=0)")
-    parser.add_argument("--snp_min_cov", type=int, default=5, help="ref or alt min coverage(default=5)")
     args = parser.parse_args()
 
     output_path = f"{args.outdirpre}_haplotype_{args.chrom}_{args.strand}_tmp.csv"
@@ -241,7 +236,7 @@ if __name__ == "__main__":
     if len(haplotype_df) != 0:
         df = haplotype_df.sort_values(by=['chrom', 'pseU_pos_1base', 'snp_pos_1base'])
         df = df.reset_index(drop=True)
-        results = df.apply(lambda row: apply_simulate_fisher(row, args.snp_min_cov), axis=1, result_type='expand')
+        results = df.apply(lambda row: apply_simulate_fisher(row), axis=1, result_type='expand')
         df[['p_value','beta', 'SE']] = results
         df = df[df['p_value'].notna()]
         df.to_csv(output_path, index=None)

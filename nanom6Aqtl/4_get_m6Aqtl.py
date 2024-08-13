@@ -130,64 +130,23 @@ def get_haplotypes(snp_base, m6A_allreadid_list, m6A_readid,snp_file_dict_res,st
     a2_m6A = len(a2_read & in_m6A_readid_set)
     return a1,a2,a1_A,a2_A,a1_m6A,a2_m6A,snpID,eaf
 
-# fisher
-def simulate_fisher_exact_se(A1_A, A2_A, A1_m6A, A2_m6A, num_simulations=100):
+def simulate_fisher_exact(A1_A, A2_A, A1_m6A, A2_m6A):
+    A1_A += 0.75 if A1_A == 0 else 0
+    A2_A += 0.75 if A2_A == 0 else 0
+    A1_m6A += 0.75 if A1_m6A == 0 else 0
+    A2_m6A += 0.75 if A2_m6A == 0 else 0
     observed = np.array([[A1_A, A2_A], [A1_m6A, A2_m6A]])
-    if 0 in [A1_A, A2_A, A1_m6A, A2_m6A]:
-        odds_ratio = ((A1_A + 0.75) * (A2_m6A + 0.75)) / ((A2_A + 0.75) * (A1_m6A + 0.75))
-        p_value = fisher_exact(observed)[1]
+    odds_ratio = (A1_A * A2_m6A) / (A2_A * A1_m6A)
+    se_log_or = np.sqrt(1/A1_A + 1/A2_m6A + 1/A2_A + 1/A1_m6A)
+    p_value = fisher_exact(observed)[1]
+    if np.isinf(odds_ratio) or odds_ratio == 0:
+        beta = None
     else:
-        odds_ratio, p_value = fisher_exact(observed)
-    n = int(A1_A+A2_A+A1_m6A+A2_m6A)
-    if np.isinf(odds_ratio) or odds_ratio == 0 or n == 0:
-        return p_value, n, None, None
-    beta = np.log(odds_ratio)
-    # Simulate to estimate the standard error
-    odds_ratios = np.zeros(num_simulations)
-    valid_simulations = 0
-    for i in range(num_simulations):
-        # Simulate contingency table based on margins
-        n1 = A1_A + A2_A
-        n2 = A1_m6A + A2_m6A
-        # Ensure n2/n and (1 - n2/n) are valid probabilities
-        p1 = np.clip(n2/n, 1e-10, 1-1e-10)  # Avoid probabilities exactly 0 or 1
-        p2 = 1 - p1
-        # Simulate cell counts under null hypothesis of independence
-        simulated_table = np.array([[np.random.binomial(n1, p1), np.random.binomial(n1, p2)],
-                                    [np.random.binomial(n - n1, p1), np.random.binomial(n - n1, p2)]])
-        # Calculate odds ratio for simulated table
-        sim_odds_ratio, _ = fisher_exact(simulated_table)
-        if not np.isinf(sim_odds_ratio) and sim_odds_ratio != 0:
-            odds_ratios[valid_simulations] = sim_odds_ratio
-            valid_simulations += 1
-    if valid_simulations > 2:
-        odds_ratio_se = np.nanstd(odds_ratios[:valid_simulations], ddof=1)
-        sd = odds_ratio_se * np.sqrt(n)
-    else:
-        sd = None
-    return p_value, n, beta, sd
-
-def simulate_fisher_exact(A1_A, A2_A, A1_m6A, A2_m6A,min_cov):
-    p_value = None
-    beta = None
-    se_log_or = None
-    if (A1_A+A1_m6A >= min_cov) & (A2_A+A2_m6A >= min_cov):
-        A1_A += 0.75 if A1_A == 0 else 0
-        A2_A += 0.75 if A2_A == 0 else 0
-        A1_m6A += 0.75 if A1_m6A == 0 else 0
-        A2_m6A += 0.75 if A2_m6A == 0 else 0
-        observed = np.array([[A1_A, A2_A], [A1_m6A, A2_m6A]])
-        odds_ratio = (A1_A * A2_m6A) / (A2_A * A1_m6A)
-        se_log_or = np.sqrt(1/A1_A + 1/A2_m6A + 1/A2_A + 1/A1_m6A)
-        p_value = fisher_exact(observed)[1]
-        if np.isinf(odds_ratio) or odds_ratio == 0:
-            beta = None
-        else:
-            beta = np.log(odds_ratio)
+        beta = np.log(odds_ratio)
     return p_value, beta, se_log_or
 
-def apply_simulate_fisher(row,min_cov):
-    return simulate_fisher_exact(row['A1_A'], row['A2_A'], row['A1_m6A'], row['A2_m6A'],min_cov)
+def apply_simulate_fisher(row):
+    return simulate_fisher_exact(row['A1_A'], row['A2_A'], row['A1_m6A'], row['A2_m6A'])
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Nanopore direct RNA data call m6Aqtl.')
@@ -201,7 +160,6 @@ if __name__ == "__main__":
     parser.add_argument("--geno_size", type=str, help="genome size file path")
     parser.add_argument("--base_minQ", type=int, default=5, help="base min qscore(default=5)")
     parser.add_argument("--read_minQ", type=int, default=0, help="read min qscore(default=0)")
-    parser.add_argument("--snp_min_cov", type=int, default=5, help="ref or alt min coverage(default=5)")
     args = parser.parse_args()
 
     output_path = f"{args.outdirpre}_haplotype_{args.chrom}_{args.strand}_tmp.csv"
@@ -243,7 +201,7 @@ if __name__ == "__main__":
     if len(haplotype_df) != 0:
         df = haplotype_df.sort_values(by=['chrom', 'm6A_pos_1base', 'snp_pos_1base'])
         df = df.reset_index(drop=True)
-        results = df.apply(lambda row: apply_simulate_fisher(row, args.snp_min_cov), axis=1, result_type='expand')
+        results = df.apply(lambda row: apply_simulate_fisher(row), axis=1, result_type='expand')
         df[['p_value','beta', 'SE']] = results
         df = df[df['p_value'].notna()]
         df.to_csv(output_path, index=None)

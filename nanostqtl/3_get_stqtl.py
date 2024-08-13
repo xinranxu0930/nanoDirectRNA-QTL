@@ -107,31 +107,25 @@ def get_haplotypes(readid_base_STscore,snp_file_dict_res,strand):
     return a1,a2,A1_STscore_l, A2_STscore_l,snpID,eaf
 
 # 线性回归
-def analyze_snp_stability(A1_stability, A2_stability,min_cov):
-    if (len(A1_stability) >= min_cov) & (len(A2_stability) >= min_cov):
-        combined_stability = A1_stability + A2_stability
-        snp_labels = [0] * len(A1_stability) + [1] * len(A2_stability)  # 0 表示 A1，1 表示 A2
-        df = pd.DataFrame({
-            'stability': combined_stability,
-            'snp': snp_labels
-        })
-        # 添加常数项（截距）
-        X = sm.add_constant(df['snp'])
-        y = df['stability']
-        # 进行线性回归
-        model = sm.OLS(y, X).fit()
-        beta = model.params[1]  # 获取 SNP 的 beta 值
-        p_value = model.pvalues[1]  # 获取 beta 值的 p 值
-        se = model.bse[1]  # 获取 SNP 的标准误
-        return p_value,beta,se
-    else:
-        return None, None, None
-    
+def analyze_snp_stability(A1_stability, A2_stability):
+    combined_stability = A1_stability + A2_stability
+    snp_labels = [0] * len(A1_stability) + [1] * len(A2_stability)  # 0 表示 A1，1 表示 A2
+    df = pd.DataFrame({
+        'stability': combined_stability,
+        'snp': snp_labels
+    })
+    # 添加常数项（截距）
+    X = sm.add_constant(df['snp'])
+    y = df['stability']
+    # 进行线性回归
+    model = sm.OLS(y, X).fit()
+    beta = model.params[1]  # 获取 SNP 的 beta 值
+    p_value = model.pvalues[1]  # 获取 beta 值的 p 值
+    se = model.bse[1]  # 获取 SNP 的标准误
+    return p_value,beta,se
 
-
-
-def apply_linear_regression(row,min_cov):
-    return analyze_snp_stability(row['A1_STscore_l'], row['A2_STscore_l'],min_cov)
+def apply_linear_regression(row):
+    return analyze_snp_stability(row['A1_STscore_l'], row['A2_STscore_l'])
 
 
 if __name__ == "__main__":
@@ -146,7 +140,6 @@ if __name__ == "__main__":
     parser.add_argument("-t","--threads", type=int, default=4, help="threads number (default: 4)")
     parser.add_argument("--base_minQ", type=int, default=5, help="base min qscore(default=5)")
     parser.add_argument("--read_minQ", type=int, default=0, help="read min qscore(default=0)")
-    parser.add_argument("--snp_min_cov", type=int, default=5, help="ref or alt min coverage(default=5)")
     args = parser.parse_args()
 
     output_path = f"{args.outdirpre}_haplotype_{args.chrom}_{args.strand}_tmp.csv"
@@ -178,7 +171,7 @@ if __name__ == "__main__":
     haplotype_df = haplotype_df[(haplotype_df['A1'] != '') & (haplotype_df['A2'] != '')] # df['A1']和df['A2']只要有一个是None 就删除这一行
     haplotype_df = haplotype_df.reset_index(drop=True)
     if len(haplotype_df) != 0:
-        results = haplotype_df.apply(lambda row: apply_linear_regression(row, args.snp_min_cov), axis=1, result_type='expand')
+        results = haplotype_df.apply(lambda row: apply_linear_regression(row), axis=1, result_type='expand')
         haplotype_df[['p_value','beta', 'SE']] = results
         haplotype_df = haplotype_df[haplotype_df['p_value'].notna()]
         haplotype_df.to_csv(output_path, index=None)
