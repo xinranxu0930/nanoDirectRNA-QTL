@@ -114,19 +114,23 @@ def get_haplotypes(readid_base_isoform,snp_file_dict_res,strand):
 
 # fisher
 def simulate_fisher_exact_se(A1_isoform1, A2_isoform1, A1_isoform2, A2_isoform2, min_cov):
-    if (A1_isoform1+A1_isoform2 >= min_cov) & (A1_isoform1+A1_isoform2 >= min_cov):
+    p_value = None
+    beta = None
+    se_log_or = None
+    if (A1_isoform1+A1_isoform2 >= min_cov) & (A2_isoform1+A2_isoform2 >= min_cov):
+        A1_isoform1 += 0.75 if A1_isoform1 == 0 else 0
+        A2_isoform1 += 0.75 if A2_isoform1 == 0 else 0
+        A1_isoform2 += 0.75 if A1_isoform2 == 0 else 0
+        A2_isoform2 += 0.75 if A2_isoform2 == 0 else 0
         observed = np.array([[A1_isoform1, A2_isoform1], [A1_isoform2, A2_isoform2]])
-        if 0 in [A1_isoform1, A2_isoform1, A1_isoform2, A2_isoform2]:
-            odds_ratio = ((A1_isoform1 + 0.75) * (A2_isoform2 + 0.75)) / ((A2_isoform1 + 0.75) * (A1_isoform2 + 0.75))
-            p_value = fisher_exact(observed)[1]
+        odds_ratio = (A1_isoform1 * A2_isoform2) / (A2_isoform1 * A1_isoform2)
+        se_log_or = np.sqrt(1/A1_isoform1 + 1/A2_isoform2 + 1/A2_isoform1 + 1/A1_isoform2)
+        p_value = fisher_exact(observed)[1]
+        if np.isinf(odds_ratio) or odds_ratio == 0:
+            beta = None
         else:
-            odds_ratio, p_value = fisher_exact(observed)
-        if np.isinf(odds_ratio) or odds_ratio == 0 :
-            return p_value, None
-        beta = np.log(odds_ratio)
-        return p_value, beta
-    else:
-        return None, None
+            beta = np.log(odds_ratio)
+    return p_value, beta, se_log_or
 
 def apply_simulate_fisher(row, min_cov):
     return simulate_fisher_exact_se(row['A1_isoform1'], row['A2_isoform1'], row['A1_isoform2'], row['A2_isoform2'],min_cov)
@@ -203,7 +207,7 @@ if __name__ == "__main__":
                 df.loc[i, "isoform_id_l"] = ','.join(df.loc[i, "isoform_id_l"])
         del df['A1_isoform_l'], df['A2_isoform_l']
         results = df.apply(lambda row: apply_simulate_fisher(row, args.snp_min_cov), axis=1, result_type='expand')
-        df[['p_value','beta']] = results
+        df[['p_value','beta', 'SE']] = results
         df = df[df['p_value'].notna()]
         df.to_csv(output_path, index=None)
         print(f"{output_path}已保存")

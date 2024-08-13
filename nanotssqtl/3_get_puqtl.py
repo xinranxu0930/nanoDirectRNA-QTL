@@ -113,20 +113,23 @@ def get_haplotypes(readid_base_TSS,snp_file_dict_res,strand):
 
 # fisher
 def simulate_fisher_exact_se(A1_TSS1, A2_TSS1, A1_TSS2, A2_TSS2,min_cov):
-    if (A1_TSS1+A1_TSS2>= min_cov) & (A2_TSS1+A2_TSS2>= min_cov):
+    p_value = None
+    beta = None
+    se_log_or = None
+    if (A1_TSS1+A1_TSS2 >= min_cov) & (A2_TSS1+A2_TSS2 >= min_cov):
+        A1_TSS1 += 0.75 if A1_TSS1 == 0 else 0
+        A2_TSS1 += 0.75 if A2_TSS1 == 0 else 0
+        A1_TSS2 += 0.75 if A1_TSS2 == 0 else 0
+        A2_TSS2 += 0.75 if A2_TSS2 == 0 else 0
         observed = np.array([[A1_TSS1, A2_TSS1], [A1_TSS2, A2_TSS2]])
-        if 0 in [A1_TSS1, A2_TSS1, A1_TSS2, A2_TSS2]:
-            odds_ratio = ((A1_TSS1 + 0.75) * (A2_TSS2 + 0.75)) / ((A2_TSS1 + 0.75) * (A1_TSS2 + 0.75))
-            p_value = fisher_exact(observed)[1]
-        else:
-            odds_ratio, p_value = fisher_exact(observed)
+        odds_ratio = (A1_TSS1 * A2_TSS2) / (A2_TSS1 * A1_TSS2)
+        se_log_or = np.sqrt(1/A1_TSS1 + 1/A2_TSS2 + 1/A2_TSS1 + 1/A1_TSS2)
+        p_value = fisher_exact(observed)[1]
         if np.isinf(odds_ratio) or odds_ratio == 0:
-            return p_value, None
+            beta = None
         else:
             beta = np.log(odds_ratio)
-            return p_value, beta
-    else:
-        return None, None
+    return p_value, beta, se_log_or
 
 def apply_simulate_fisher(row,min_cov):
     return simulate_fisher_exact_se(row['A1_TSS1'], row['A2_TSS1'], row['A1_TSS2'], row['A2_TSS2'],min_cov)
@@ -204,7 +207,7 @@ if __name__ == "__main__":
                 df.loc[i, "TSS_id_l"] = ','.join(df.loc[i, "TSS_id_l"])
         del df['A1_TSS_l'], df['A2_TSS_l']
         results = df.apply(lambda row: apply_simulate_fisher(row, args.snp_min_cov), axis=1, result_type='expand')
-        df[['p_value','beta']] = results
+        df[['p_value','beta', 'SE']] = results
         df = df[df['p_value'].notna()]
         df.to_csv(output_path, index=None)
         print(f"{output_path}已保存")

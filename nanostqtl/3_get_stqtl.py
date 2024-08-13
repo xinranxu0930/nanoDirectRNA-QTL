@@ -122,9 +122,13 @@ def analyze_snp_stability(A1_stability, A2_stability,min_cov):
         model = sm.OLS(y, X).fit()
         beta = model.params[1]  # 获取 SNP 的 beta 值
         p_value = model.pvalues[1]  # 获取 beta 值的 p 值
-        return p_value,beta
+        se = model.bse[1]  # 获取 SNP 的标准误
+        return p_value,beta,se
     else:
-        return None, None
+        return None, None, None
+    
+
+
 
 def apply_linear_regression(row,min_cov):
     return analyze_snp_stability(row['A1_STscore_l'], row['A2_STscore_l'],min_cov)
@@ -175,7 +179,7 @@ if __name__ == "__main__":
     haplotype_df = haplotype_df.reset_index(drop=True)
     if len(haplotype_df) != 0:
         results = haplotype_df.apply(lambda row: apply_linear_regression(row, args.snp_min_cov), axis=1, result_type='expand')
-        haplotype_df[['p_value', 'beta']] = results
+        haplotype_df[['p_value','beta', 'SE']] = results
         haplotype_df = haplotype_df[haplotype_df['p_value'].notna()]
         haplotype_df.to_csv(output_path, index=None)
         print(f"{output_path}已保存")
