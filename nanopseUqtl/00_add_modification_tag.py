@@ -4,9 +4,9 @@ import pysam
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser("Add modification tag to bam file")
-    parser.add_argument("-f","--fastq", type=str, help="fastq file path")
-    parser.add_argument("-b","--bam", type=str, help="bam file without modification tag")
-    parser.add_argument("-t","--threads", type=int, default=2, help="threads")
+    parser.add_argument("-f", "--fastq", type=str, help="fastq file path")
+    parser.add_argument("-b", "--bam", type=str, help="bam file without modification tag")
+    parser.add_argument("-t", "--threads", type=int, default=2, help="threads")
     args = parser.parse_args()
 
     newbam = args.bam.replace(".bam","_mod_map.bam")
