@@ -5,12 +5,7 @@ import pickle
 from collections import Counter
 import numpy as np
 from scipy import stats
-from statsmodels.genmod.bayes_mixed_glm import BinomialBayesMixedGLM
-import statsmodels.api as sm
 from statsmodels.stats.multitest import multipletests
-from scipy.stats import combine_pvalues, fisher_exact, chi2_contingency
-from statsmodels.api import Logit
-from statsmodels.tools import add_constant
 
 
 def create_pseU_dict(row):
@@ -134,14 +129,18 @@ def analyze_snp_methylation_bayes(A1_U, A2_U, A1_pseU, A2_pseU, n_samples=100000
         posterior_prob = np.mean(diff_samples > 0)
         # 计算等效的p值
         p_value = 2 * min(posterior_prob, 1 - posterior_prob)
-        return p_value,posterior_prob
+        # 计算beta (β)
+        beta = np.mean(diff_samples)
+        # 计算标准误差 (SE)
+        se = np.std(diff_samples)
+        return p_value,posterior_prob,beta,se
     else:
-        return None,None
+        return None,None,None,None
 
 
 def process_all_data(df):
     results = df.apply(lambda row: analyze_snp_methylation_bayes(row['A1_U'], row['A2_U'], row['A1_pseU'], row['A2_pseU']), axis=1)
-    df['p_value'],df['posterior_prob'] = zip(*results)
+    df['p_value'],df['posterior_prob'],df['beta'],df['SE'] = zip(*results)
     df = df[(df['p_value'].notna())]
     df['FDR'] = multipletests(df['p_value'], method='fdr_bh')[1]
     return df
