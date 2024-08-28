@@ -13,14 +13,14 @@ def create_pseU_dict(row):
         return row["pos_0base"], row["mod_rate"]
 
 
-def count_haplotype(chrom, start, end, strand, bamfile, mod_dict, pseU_id_dict, snp_file_dict,base_minQ,read_minQ):
+def count_haplotype(chrom, start, end, strand, bamfile, mod_dict, pseU_id_dict, snp_file_dict, base_minQ, read_minQ, threadsnum):
     # mod_dict 甲基化位点信息 int(pos0):mod_rate
     # pseU_id_dict 含有甲基化的read chrom_pos0_strand: read1;read2;...
     # snp_file_dict snp位点信息 int(pos0): rsid;A1;A2;EAF
     pseU_all_reads,snp_bases,snp_pseU_bases = {},{},{}
     # pseU_all_reads {pos0}:[read1,read2,read3]
     # snp_bases,snp_pseU_bases {pos0}:{read1:"A",read2:"A",read3:"T"}
-    with pysam.AlignmentFile(bamfile, "rb",threads=10) as samfile:
+    with pysam.AlignmentFile(bamfile, "rb",threads=threadsnum) as samfile:
         for pileupcolumn in samfile.pileup(chrom, start, end, min_base_quality=base_minQ, min_mapping_quality=read_minQ, stepper="samtools", max_depth=5000000):
             base_pos = pileupcolumn.reference_pos
             # 首先获取pseU处的所有read，因为存在pseU处是N的情况，所以这里要筛选一下
@@ -113,16 +113,18 @@ def get_haplotypes(snp_base, pseU_readid, unpseU_readid, snp_file_dict_res):
         return None
 
 
-def analyze_snp_methylation_bayes(A1_U, A2_U, A1_pseU, A2_pseU, n_samples=100000):
+def analyze_snp_methylation_bayes(A1_U, A2_U, A1_pseU, A2_pseU, n_samples=10000000, random_state=42):
     if A1_U>0 and A2_U>0 and A1_pseU>0 and A2_pseU>0 and (A1_U+A2_U+A1_pseU+A2_pseU)>20:
         # 使用Beta分布作为先验和后验
         post_alpha_ref = 1 + A1_pseU
         post_beta_ref = 1 + A1_U
         post_alpha_alt = 1 + A2_pseU
         post_beta_alt = 1 + A2_U
+        # 设置随机种子
+        rng = np.random.default_rng(random_state)
         # 从后验分布中抽样
-        theta_ref_samples = stats.beta.rvs(post_alpha_ref, post_beta_ref, size=n_samples)
-        theta_alt_samples = stats.beta.rvs(post_alpha_alt, post_beta_alt, size=n_samples)
+        theta_ref_samples = stats.beta.rvs(post_alpha_ref, post_beta_ref, size=n_samples, random_state=rng)
+        theta_alt_samples = stats.beta.rvs(post_alpha_alt, post_beta_alt, size=n_samples, random_state=rng)
         # 计算差异
         diff_samples = theta_alt_samples - theta_ref_samples
         # 计算后验概率
@@ -133,9 +135,9 @@ def analyze_snp_methylation_bayes(A1_U, A2_U, A1_pseU, A2_pseU, n_samples=100000
         beta = np.mean(diff_samples)
         # 计算标准误差 (SE)
         se = np.std(diff_samples)
-        return p_value,posterior_prob,beta,se
+        return p_value, posterior_prob, beta, se
     else:
-        return None,None,None,None
+        return None, None, None, None
 
 
 def process_all_data(df):
@@ -156,6 +158,7 @@ if __name__ == "__main__":
     parser.add_argument("-c","--chrom", type=str, help="chromosome")
     parser.add_argument("-s","--strand", type=str, help="different strand processing")
     parser.add_argument("--geno_size", type=str, help="genome size file path")
+    parser.add_argument("-t","--threads", type=int, default=4, help="threads number (default: 4)")
     parser.add_argument("--base_minQ", type=int, default=5, help="base min qscore(default=5)")
     parser.add_argument("--read_minQ", type=int, default=0, help="read min qscore(default=0)")
     args = parser.parse_args()
@@ -192,7 +195,7 @@ if __name__ == "__main__":
         ])
 
     start,end = 0,int(geno_size_dict[args.chrom])
-    haplotype_df = pd.concat([haplotype_df, count_haplotype(args.chrom, start, end, args.strand, args.bam, mod_dict, pseU_id_dict, snp_dict, base_minQ, read_minQ)],ignore_index=True)
+    haplotype_df = pd.concat([haplotype_df, count_haplotype(args.chrom, start, end, args.strand, args.bam, mod_dict, pseU_id_dict, snp_dict, base_minQ, read_minQ, args.threads)],ignore_index=True)
     haplotype_df = haplotype_df[(haplotype_df['A1'] != '') & (haplotype_df['A2'] != '')]
     if len(haplotype_df) != 0:
         df = haplotype_df.sort_values(by=['chrom', 'snp_pos_1base', 'pseU_pos_1base'])
