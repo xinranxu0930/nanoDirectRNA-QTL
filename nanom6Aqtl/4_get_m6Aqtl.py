@@ -13,14 +13,14 @@ def create_m6A_dict(row):
         return row["pos_0base"], row["methy_rate"]
 
 
-def count_haplotype(chrom, start, end, strand, bamfile, methy_dict, m6A_id_dict, snp_file_dict,base_minQ,read_minQ):
+def count_haplotype(chrom, start, end, strand, bamfile, methy_dict, m6A_id_dict, snp_file_dict, base_minQ, read_minQ, threadsnum):
     # methy_dict 甲基化位点信息 int(pos0):methy_rate
     # m6A_id_dict 含有甲基化的read chrom_pos0_strand: read1;read2;...
     # snp_file_dict snp位点信息 int(pos0): rsid;A1;A2;EAF
     m6A_all_reads,snp_bases,snp_m6A_bases = {},{},{}
     # m6A_all_reads {pos0}:[read1,read2,read3]
     # snp_bases,snp_m6A_bases {pos0}:{read1:"A",read2:"A",read3:"T"}
-    with pysam.AlignmentFile(bamfile, "rb",threads=10) as samfile:
+    with pysam.AlignmentFile(bamfile, "rb",threads=threadsnum) as samfile:
         for pileupcolumn in samfile.pileup(chrom, start, end, min_base_quality=base_minQ, min_mapping_quality=read_minQ, stepper="samtools", max_depth=5000000):
             base_pos = pileupcolumn.reference_pos
             # 首先获取m6A处的所有read，因为存在m6A处是N的情况，所以这里要筛选一下
@@ -96,16 +96,16 @@ def start_get_haplotypes(chrom, strand, m6A_all_reads, snp_bases, m6A_id_dict, s
 
 def get_haplotypes(snp_base, m6A_readid, unm6A_readid, snp_file_dict_res):
     intersect_m6A_read_set = set(snp_base.keys()) & m6A_readid  # SNP覆盖的所有被修饰的read
-    intersect_unm6A_read_set = set(snp_base.keys()) & unm6A_readid  # SNP覆盖的所有没有修饰的read
-    if (len(intersect_m6A_read_set) == 0) or (len(intersect_unm6A_read_set) == 0):
+    intersect_Anm6A_read_set = set(snp_base.keys()) & unm6A_readid  # SNP覆盖的所有没有修饰的read
+    if (len(intersect_m6A_read_set) == 0) or (len(intersect_Anm6A_read_set) == 0):
         return None
     snpID, A1, A2, eaf = snp_file_dict_res.split(";")[:4]
     eaf = float(eaf)
     A1_read = set(k for k, v in snp_base.items() if v == A1)
     A2_read = set(k for k, v in snp_base.items() if v == A2)
     if A1_read and A2_read:
-        A1_A = len(A1_read & intersect_unm6A_read_set)
-        A2_A = len(A2_read & intersect_unm6A_read_set)
+        A1_A = len(A1_read & intersect_Anm6A_read_set)
+        A2_A = len(A2_read & intersect_Anm6A_read_set)
         A1_m6A = len(A1_read & intersect_m6A_read_set)
         A2_m6A = len(A2_read & intersect_m6A_read_set)
         return A1,A2,A1_A,A2_A,A1_m6A,A2_m6A,snpID,eaf
@@ -113,34 +113,43 @@ def get_haplotypes(snp_base, m6A_readid, unm6A_readid, snp_file_dict_res):
         return None
 
 
-def analyze_snp_methylation_bayes(A1_A, A2_A, A1_m6A, A2_m6A, n_samples=100000):
-    if A1_A>0 and A2_A>0 and A1_m6A>0 and A2_m6A>0 and (A1_A+A2_A+A1_m6A+A2_m6A)>20:
+def analyze_snp_methylation_bayes(A1_A, A2_A, A1_m6A, A2_m6A, n_samples=10000000, random_state=42, effect_size_threshold=0.1):
+    if A1_A>0 and A2_A>0 and A1_m6A>0 and A2_m6A>0:
         # 使用Beta分布作为先验和后验
         post_alpha_ref = 1 + A1_m6A
         post_beta_ref = 1 + A1_A
         post_alpha_alt = 1 + A2_m6A
         post_beta_alt = 1 + A2_A
-        # 从后验分布中抽样
-        theta_ref_samples = stats.beta.rvs(post_alpha_ref, post_beta_ref, size=n_samples)
-        theta_alt_samples = stats.beta.rvs(post_alpha_alt, post_beta_alt, size=n_samples)
+        observed_theta_alt = A2_m6A/(A2_m6A+A2_A)
+        observed_theta_ref = A1_m6A/(A1_m6A+A1_A)
+
+        # 设置随机种子
+        rng = np.random.default_rng(random_state)
+        # 计算观测差异
+        observed_diff = abs(observed_theta_alt - observed_theta_ref)
+        # 在H0假设下，从后验分布中抽样 (θ = 0)
+        theta_ref_samples_H0 = stats.beta.rvs(post_alpha_ref, post_beta_ref, size=n_samples, random_state=rng)
+        theta_alt_samples_H0 = theta_ref_samples_H0  # 在H0假设下，θ相等
+        # 在H1假设下，从后验分布中抽样 (θ ≠ 0)
+        theta_ref_samples_H1 = stats.beta.rvs(post_alpha_ref, post_beta_ref, size=n_samples, random_state=rng)
+        theta_alt_samples_H1 = stats.beta.rvs(post_alpha_alt, post_beta_alt, size=n_samples, random_state=rng)
         # 计算差异
-        diff_samples = theta_alt_samples - theta_ref_samples
-        # 计算后验概率
-        posterior_prob = np.mean(diff_samples > 0)
-        # 计算等效的p值
-        p_value = 2 * min(posterior_prob, 1 - posterior_prob)
+        diff_samples_H0 = np.abs(theta_alt_samples_H0 - theta_ref_samples_H0)
+        diff_samples_H1 = np.abs(theta_alt_samples_H1 - theta_ref_samples_H1)
+        # 计算边际后验概率 P(H0 | 数据):实际观测差异大于等于在H0假设下的模拟差异的概率
+        posterior_prob_H0 = np.mean(diff_samples_H0 >= observed_diff)
         # 计算beta (β)
-        beta = np.mean(diff_samples)
+        beta = observed_theta_alt - observed_theta_ref
         # 计算标准误差 (SE)
-        se = np.std(diff_samples)
-        return p_value,posterior_prob,beta,se
+        se = np.std(diff_samples_H1)
+        return posterior_prob_H0, beta, se
     else:
-        return None,None,None,None
+        return None, None, None
 
 
 def process_all_data(df):
     results = df.apply(lambda row: analyze_snp_methylation_bayes(row['A1_A'], row['A2_A'], row['A1_m6A'], row['A2_m6A']), axis=1)
-    df['p_value'],df['posterior_prob'],df['beta'],df['SE'] = zip(*results)
+    df['p_value'],df['beta'],df['SE'] = zip(*results)
     df = df[(df['p_value'].notna())]
     df['FDR'] = multipletests(df['p_value'], method='fdr_bh')[1]
     return df
@@ -156,6 +165,7 @@ if __name__ == "__main__":
     parser.add_argument("-c","--chrom", type=str, help="chromosome")
     parser.add_argument("-s","--strand", type=str, help="different strand processing")
     parser.add_argument("--geno_size", type=str, help="genome size file path")
+    parser.add_argument("-t","--threads", type=int, default=4, help="threads number (default: 4)")
     parser.add_argument("--base_minQ", type=int, default=5, help="base min qscore(default=5)")
     parser.add_argument("--read_minQ", type=int, default=0, help="read min qscore(default=0)")
     args = parser.parse_args()
@@ -192,7 +202,7 @@ if __name__ == "__main__":
         ])
 
     start,end = 0,int(geno_size_dict[args.chrom])
-    haplotype_df = pd.concat([haplotype_df, count_haplotype(args.chrom, start, end, args.strand, args.bam, methy_dict, m6A_id_dict, snp_dict, base_minQ, read_minQ)],ignore_index=True)
+    haplotype_df = pd.concat([haplotype_df, count_haplotype(args.chrom, start, end, args.strand, args.bam, methy_dict, m6A_id_dict, snp_dict, base_minQ, read_minQ, args.threads)],ignore_index=True)
     haplotype_df = haplotype_df[(haplotype_df['A1'] != '') & (haplotype_df['A2'] != '')]
     if len(haplotype_df) != 0:
         df = haplotype_df.sort_values(by=['chrom', 'snp_pos_1base', 'm6A_pos_1base'])

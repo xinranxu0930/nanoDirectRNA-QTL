@@ -114,7 +114,10 @@ def get_haplotypes(snp_base, pseU_readid, unpseU_readid, snp_file_dict_res):
 
 
 def analyze_snp_methylation_bayes(A1_U, A2_U, A1_pseU, A2_pseU, n_samples=10000000, random_state=42):
-    if A1_U>0 and A2_U>0 and A1_pseU>0 and A2_pseU>0 and (A1_U+A2_U+A1_pseU+A2_pseU)>20:
+    # if A1_U>0 and A2_U>0 and A1_pseU>0 and A2_pseU>0 and (A1_U+A2_U+A1_pseU+A2_pseU)>100:
+    values = [A1_U, A2_U, A1_pseU, A2_pseU]
+    zero_count = values.count(0)
+    if zero_count <= 1:
         # 使用Beta分布作为先验和后验
         post_alpha_ref = 1 + A1_pseU
         post_beta_ref = 1 + A1_U
@@ -125,27 +128,29 @@ def analyze_snp_methylation_bayes(A1_U, A2_U, A1_pseU, A2_pseU, n_samples=100000
         # 从后验分布中抽样
         theta_ref_samples = stats.beta.rvs(post_alpha_ref, post_beta_ref, size=n_samples, random_state=rng)
         theta_alt_samples = stats.beta.rvs(post_alpha_alt, post_beta_alt, size=n_samples, random_state=rng)
-        # 计算差异
-        diff_samples = theta_alt_samples - theta_ref_samples
-        # 计算后验概率
-        posterior_prob = np.mean(diff_samples > 0)
-        # 计算等效的p值
-        p_value = 2 * min(posterior_prob, 1 - posterior_prob)
-        # 计算beta (β)
-        beta = np.mean(diff_samples)
-        # 计算标准误差 (SE)
-        se = np.std(diff_samples)
-        return p_value, posterior_prob, beta, se
+        # 计算效应大小
+        effect_size = np.mean(theta_ref_samples - theta_alt_samples)
+        # 计算 beta（标准化效应大小）
+        pooled_sd = np.sqrt((np.var(theta_ref_samples) + np.var(theta_alt_samples)) / 2)
+        beta = effect_size / pooled_sd
+        # 计算 beta 的标准误
+        se = np.std(theta_ref_samples - theta_alt_samples) / pooled_sd
+        # 计算 z 分数
+        z_score = beta / se
+        # 计算传统p值（双侧）
+        p_value = 2 * (1 - stats.norm.cdf(abs(z_score)))
+        return p_value, z_score, beta, se
     else:
         return None, None, None, None
 
 
 def process_all_data(df):
     results = df.apply(lambda row: analyze_snp_methylation_bayes(row['A1_U'], row['A2_U'], row['A1_pseU'], row['A2_pseU']), axis=1)
-    df['p_value'],df['posterior_prob'],df['beta'],df['SE'] = zip(*results)
+    df['p_value'],df['z_score'],df['beta'],df['SE'] = zip(*results)
     df = df[(df['p_value'].notna())]
     df['FDR'] = multipletests(df['p_value'], method='fdr_bh')[1]
     return df
+
 
 
 if __name__ == "__main__":

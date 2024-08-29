@@ -2,47 +2,43 @@ import pandas as pd
 import pysam
 import scipy
 import argparse
-import pickle
 from collections import Counter
-import os
-from scipy.stats import fisher_exact
 import numpy as np
-import ast
+from statsmodels.stats.multitest import multipletests
+from scipy import stats
 
-def get_reverse_complementary_sequence(seq):
-    seqreverse = seq[::-1]
-    transtable = str.maketrans('ATGCatgc','TACGtacg')
-    finalseq = seqreverse.translate(transtable).upper()
-    return finalseq
 
 def count_haplotype(chrom, end, strand, bamfile, read_APA_dict, snp_file_dict,threadsnum,base_minQ,read_minQ):
     # read_APA_dict read对应的APA read:APA
-    # snp_file_dict snp位点信息 chrom_pos0: rsid;A1;A2;EAF
+    # snp_file_dict snp位点信息 int(pos0): rsid;A1;A2;EAF
     snp_bases = {}
     # snp_bases 存放的是snp位点 [pos0]:{read1:"A",read2:"A",read3:"T"}
     with pysam.AlignmentFile(bamfile, "rb",threads=threadsnum) as samfile:
-        for pileupcolumn in samfile.pileup(chrom, 0, end,min_base_quality=base_minQ,min_mapping_quality=read_minQ,stepper="samtools",max_depth=50000):
-            base_pos = str(pileupcolumn.reference_pos)
+        for pileupcolumn in samfile.pileup(chrom, 0, end, min_base_quality=base_minQ, min_mapping_quality=read_minQ, stepper="samtools", max_depth=5000000):
+            base_pos = pileupcolumn.reference_pos
             ## 处理snp位点的情况
             # 1判断位置是否是snp
-            if f"{chrom}_{base_pos}" in snp_file_dict:
+            if base_pos in snp_file_dict:
                 # 2判断是否是杂合子位点
-                seqs = [i.upper() for i in pileupcolumn.get_query_sequences()]  # 被覆盖位点处的所有碱基
-                if len(set(seqs)) > 1:
+                seqs = [i.upper() for i in pileupcolumn.get_query_sequences()]
+                if len(set([seq for seq in seqs if seq])) > 1:
                     snp_bases[base_pos] = {
                         i: j for i, j in zip(pileupcolumn.get_query_names(), seqs)
                     }
     if len(snp_bases) == 0:
-        print(f'{chrom} {strand}中,没有snp被覆盖')
+        print(f'{chrom} {strand}中,没有杂合的snp被read覆盖')
         return None
+    ########
+    ########
+    ########
+    print(len(snp_bases))
     haplotype_df = pd.DataFrame(columns=[
         "chrom","strand","snp_pos_1base",
-        "rsID","A1","A2",
-        "A1_APA_l","A2_APA_l",
-        "APA_id_l",
-        "EAF",
+        "rsID","A1","A2","EAF",
+        "A1_APA_count","A2_APA_count",
+        "APA_id",
         ])
-    result = start_get_haplotypes(chrom, strand, snp_bases, read_APA_dict, snp_file_dict)
+    result = start_get_haplotypes(chrom, snp_bases, read_APA_dict, snp_file_dict)
     if result is None:
         print(f'{chrom} {strand}中没有符合条件的snp')
         return None
@@ -50,94 +46,121 @@ def count_haplotype(chrom, end, strand, bamfile, read_APA_dict, snp_file_dict,th
         ith = 0
         for i in result:
             haplotype_df.loc[ith] = (
-                chrom,strand,int(i[7])+1,
-                i[5],i[0],i[1],
+                chrom,strand,i[7]+1,
+                i[5],i[0],i[1],i[6],
                 i[2],i[3],
                 i[4],
-                i[6],
             )
             ith += 1
         return haplotype_df
 
-def start_get_haplotypes(chrom,strand,snp_bases,read_APA_dict,snp_file_dict):
-    res_l = [] # 每一个元素都表示一个snp的结果 [snp_genome_0base,ref,alt,ref_l,alt_l,APA_l]
+def start_get_haplotypes(chrom,snp_bases,read_APA_dict,snp_file_dict):
+    res_l = []
     # snp_bases [pos0]:{read1:"A",read2:"A",read3:"T"}
     # read_APA_dict read:APA
     for snp_pos, snp_base in snp_bases.items():
-        readid_base_APA = [] # 每一个新的snp都有一个新的readid_base_APA，里面是覆盖这个snp的所有read的base和APA
-        for read,base in snp_base.items():
-            if read not in read_APA_dict:
-                continue
-            else:
-                readid_base_APA.append([base,read_APA_dict[read]]) # 这里是某个snp处的read、base和APA的对应情况，因为不需要知道具体的read是什么，只要知道base和APA的对应关系就可以，所以放在list中
-        res = get_haplotypes(readid_base_APA, snp_file_dict[f"{chrom}_{snp_pos}"],strand)
+        snp_base_filter = {key: value for key, value in snp_base.items() if key in read_APA_dict}
+        if len(snp_base_filter) == 0:
+            continue # 说明这个snp覆盖的read没有明确的APA分类
+        res = get_haplotypes_fourfold(snp_base_filter, read_APA_dict, snp_file_dict[snp_pos])
         if res is not None:
-            a1,a2,A1_count_l,A2_count_l,all_APA_type,snpID,eaf = res
-            res_l.append([a1,a2,A1_count_l,A2_count_l,all_APA_type,snpID,eaf,snp_pos])
+            A1,A2,A1_count_l,A2_count_l,all_APA_type,snpID,eaf = res
+            res_l.append([A1,A2,A1_count_l,A2_count_l,all_APA_type,snpID,eaf,snp_pos])
     if len(res_l) != 0:
         return res_l
     else:
         return None
 
-def get_haplotypes(readid_base_APA,snp_file_dict_res,strand):
-    if len(readid_base_APA) == 0:
-        return None
-    snpID = snp_file_dict_res.split(";")[0]
-    eaf = float(snp_file_dict_res.split(";")[3])
-    all_base_list = list(i[0] for i in readid_base_APA)
-    all_APA_type = list(set(i[1] for i in readid_base_APA))
-    A1,A2 = snp_file_dict_res.split(";")[1],snp_file_dict_res.split(";")[2]
-    a1,a2 = "",""
-    if strand == "-":
-        A1 = get_reverse_complementary_sequence(A1)
-        A2 = get_reverse_complementary_sequence(A2)
-    for base in all_base_list:
-        if base == A1:
-            a1 = base
-        elif base == A2:
-            a2 = base
-    if (a1 == "") and (a2 == ""):
-        return None
-    # 遍历all_APA_type列表
-    A1_count_l, A2_count_l = [], []
-    if a1 != "" and a2 != "":
-        A1_count_l = [sum(1 for base_APA in readid_base_APA if base_APA[0] == a1 and base_APA[1] == APA) for APA in all_APA_type]
-        A2_count_l = [sum(1 for base_APA in readid_base_APA if base_APA[0] == a2 and base_APA[1] == APA) for APA in all_APA_type]
-    elif a2 == "":
-        A1_count_l = [sum(1 for base_APA in readid_base_APA if base_APA[0] == a1 and base_APA[1] == APA) for APA in all_APA_type]
-        A2_count_l = [0 for _ in range(len(all_APA_type))]
+def get_haplotypes_fourfold(snp_base, read_APA_dict,snp_file_dict_res):
+    snpID, A1, A2, eaf = snp_file_dict_res.split(";")[:4]
+    eaf = float(eaf)
+    A1_read = set(k for k, v in snp_base.items() if v == A1)
+    A2_read = set(k for k, v in snp_base.items() if v == A2)
+    if A1_read and A2_read:
+        A1_apa = Counter(read_APA_dict[read_id] for read_id in A1_read if read_id in read_APA_dict)
+        A2_apa = Counter(read_APA_dict[read_id] for read_id in A2_read if read_id in read_APA_dict)
+        all_apa_types = set(A1_apa.keys()) | set(A2_apa.keys())
+        data = {
+            'A1': [A1_apa.get(apa, 0) for apa in all_apa_types],
+            'A2': [A2_apa.get(apa, 0) for apa in all_apa_types]
+        }
+        df = pd.DataFrame(data, index=list(all_apa_types))
+        if len(df)==1:
+            return None
+        elif len(df)>2:
+            total_counts = df.sum(axis=1)
+            top_apa = total_counts.idxmax()
+            new_df = pd.DataFrame({
+                'A1': [df.loc[top_apa, 'A1'], df.drop(top_apa).sum()['A1']],
+                'A2': [df.loc[top_apa, 'A2'], df.drop(top_apa).sum()['A2']]
+                }, index=[top_apa, 'others'])
+            return A1,A2,new_df['A1'].tolist(),new_df['A2'].tolist(),df.index.tolist(),snpID,eaf
+        else:
+            return A1,A2,df['A1'].tolist(),df['A2'].tolist(),df.index.tolist(),snpID,eaf
+
+
+def get_haplotypes_Multidimensional(snp_base, read_APA_dict,snp_file_dict_res):
+    snpID, A1, A2, eaf = snp_file_dict_res.split(";")[:4]
+    eaf = float(eaf)
+    A1_read = set(k for k, v in snp_base.items() if v == A1)
+    A2_read = set(k for k, v in snp_base.items() if v == A2)
+    if A1_read and A2_read:
+        A1_apa = Counter(read_APA_dict[read_id] for read_id in A1_read if read_id in read_APA_dict)
+        A2_apa = Counter(read_APA_dict[read_id] for read_id in A2_read if read_id in read_APA_dict)
+        all_apa_types = set(A1_apa.keys()) | set(A2_apa.keys())
+        data = {
+            'A1': [A1_apa.get(apa, 0) for apa in all_apa_types],
+            'A2': [A2_apa.get(apa, 0) for apa in all_apa_types]
+        }
+        df = pd.DataFrame(data, index=list(all_apa_types))
+        if len(df)==1:
+            return None
+        else:
+            return A1,A2,df['A1'].tolist(),df['A2'].tolist(),df.index.tolist(),snpID,eaf
+
+
+def analyze_snp_methylation_bayes_fourfold(A1_APA_count, A2_APA_count, n_samples=10000000, random_state=42):
+    A1_APA1, A2_APA1, A1_APA2, A2_APA2 = A1_APA_count[0], A2_APA_count[0], A1_APA_count[1], A2_APA_count[1]
+    if A1_APA1>0 and A2_APA1>0 and A1_APA2>0 and A2_APA2>0 and (A1_APA1+A2_APA1+A1_APA2+A2_APA2)>20:
+        # 使用Beta分布作为先验和后验
+        post_alpha_ref = 1 + A1_APA2
+        post_beta_ref = 1 + A1_APA1
+        post_alpha_alt = 1 + A2_APA2
+        post_beta_alt = 1 + A2_APA1
+        # 设置随机种子
+        rng = np.random.default_rng(random_state)
+        # 从后验分布中抽样
+        theta_ref_samples = stats.beta.rvs(post_alpha_ref, post_beta_ref, size=n_samples, random_state=rng)
+        theta_alt_samples = stats.beta.rvs(post_alpha_alt, post_beta_alt, size=n_samples, random_state=rng)
+        # 计算差异
+        diff_samples = theta_alt_samples - theta_ref_samples
+        # 计算后验概率
+        posterior_prob = np.mean(diff_samples > 0)
+        # 计算等效的p值
+        p_value = 2 * min(posterior_prob, 1 - posterior_prob)
+        # 计算beta (β)
+        beta = np.mean(diff_samples)
+        # 计算标准误差 (SE)
+        se = np.std(diff_samples)
+        return p_value, posterior_prob, beta, se
     else:
-        A2_count_l = [sum(1 for base_APA in readid_base_APA if base_APA[0] == a2 and base_APA[1] == APA) for APA in all_APA_type]
-        A1_count_l = [0 for _ in range(len(all_APA_type))]
-    return a1,a2,A1_count_l,A2_count_l,all_APA_type,snpID,eaf
+        return None, None, None, None
 
-# fisher
-def simulate_fisher_exact_se(A1_apa1, A2_apa1, A1_apa2, A2_apa2):
-    A1_apa1 += 0.75 if A1_apa1 == 0 else 0
-    A2_apa1 += 0.75 if A2_apa1 == 0 else 0
-    A1_apa2 += 0.75 if A1_apa2 == 0 else 0
-    A2_apa2 += 0.75 if A2_apa2 == 0 else 0
-    observed = np.array([[A1_apa1, A2_apa1], [A1_apa2, A2_apa2]])
-    odds_ratio = (A1_apa1 * A2_apa2) / (A2_apa1 * A1_apa2)
-    se_log_or = np.sqrt(1/A1_apa1 + 1/A2_apa2 + 1/A2_apa1 + 1/A1_apa2)
-    p_value = fisher_exact(observed)[1]
-    if np.isinf(odds_ratio) or odds_ratio == 0:
-        beta = None
-    else:
-        beta = np.log(odds_ratio)
-    return p_value, beta, se_log_or
 
-def apply_simulate_fisher(row):
-    return simulate_fisher_exact_se(row['A1_apa1'], row['A2_apa1'], row['A1_apa2'], row['A2_apa2'])
+def process_all_data(df):
+    results = df.apply(lambda row: analyze_snp_methylation_bayes_fourfold(row['A1_count_l'], row['A2_count_l']), axis=1)
+    df['p_value'],df['posterior_prob'],df['beta'],df['SE'] = zip(*results)
+    df = df[(df['p_value'].notna())]
+    df['FDR'] = multipletests(df['p_value'], method='fdr_bh')[1]
+    return df
 
-def convert_to_int_list(x):
-    return [int(i) for i in ast.literal_eval(x)]
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Nanopore direct RNA data call 3\'aQTL.')
     parser.add_argument("-b","--bam", type=str, help="bam file path")
     parser.add_argument("--snp_info", type=str, help="processed snp pkl file path")
-    parser.add_argument("-p","--dirpre", type=str, help="outdir and pre")
+    parser.add_argument("-o","--outdirpre", type=str, help="outdir and pre")
     parser.add_argument("-f","--read_overlap_file", type=str, help="read2apadb overlap file path")
     parser.add_argument("-c","--chrom", type=str, help="chromosome")
     parser.add_argument("-s","--strand", type=str, help="different strand processing")
@@ -147,7 +170,7 @@ if __name__ == "__main__":
     parser.add_argument("--read_minQ", type=int, default=0, help="read min qscore(default=0)")
     args = parser.parse_args()
 
-    output_path = f"{args.dirpre}_haplotype_{args.chrom}_{args.strand}_tmp.csv"
+    output_path = f"{args.outdirpre}_haplotype_{args.chrom}_{args.strand}_tmp.csv"
 
     base_minQ = args.base_minQ-1 if args.base_minQ != 0 else 0
     read_minQ = args.read_minQ-1 if args.read_minQ != 0 else 0
@@ -157,52 +180,24 @@ if __name__ == "__main__":
 
     snp_info = pd.read_csv(args.snp_info, sep="\t")
     snp_info.columns = ["chrom","pos1","rsID","A1","A2","EAF"]
+    snp_info = snp_info[snp_info['chrom'] == args.chrom]
     snp_info["pos0"] = snp_info["pos1"].astype(int) - 1
-    snp_info["k"] = snp_info["chrom"] + "_" + snp_info["pos0"].astype(str)
     snp_info["v"] = snp_info["rsID"] + ";" + snp_info["A1"] + ";" + snp_info["A2"] + ";" + snp_info["EAF"].astype(str)
-    snp_dict = dict(zip(snp_info["k"], snp_info["v"])) # chrom_pos0: rsid;A1;A2;EAF
+    snp_dict = dict(zip(snp_info["pos0"], snp_info["v"])) # pos0: rsid;A1;A2;EAF
 
     geno_size_df = pd.read_csv(args.geno_size, sep="\t", header=None, names=["chrom","size"])
     geno_size_dict = dict(zip(geno_size_df["chrom"], geno_size_df["size"]))
     haplotype_df = pd.DataFrame(columns=[
         "chrom","strand","snp_pos_1base",
-        "rsID","A1","A2",
-        "A1_APA_l","A2_APA_l",
-        "APA_id_l",
-        "EAF",
+        "rsID","A1","A2","EAF",
+        "A1_APA_count","A2_APA_count",
+        "APA_id",
         ])
     end = geno_size_dict[args.chrom]
-    haplotype_df = pd.concat([haplotype_df, count_haplotype(args.chrom, end, args.strand, args.bam, df_dict, snp_dict, args.threads,base_minQ,read_minQ)],ignore_index=True)
+    haplotype_df = pd.concat([haplotype_df, count_haplotype(args.chrom, end, args.strand, args.bam, df_dict, snp_dict, args.threads, base_minQ, read_minQ)],ignore_index=True)
     if len(haplotype_df) != 0:
-        haplotype_df = haplotype_df[haplotype_df['APA_id_l'].str.len() != 1] # 删除df['APA_id_l']中长度为1的行
-        haplotype_df = haplotype_df[(haplotype_df['A1'] != '') & (haplotype_df['A2'] != '')] # df['ref']和df['alt']只要有一个是None 就删除这一行
-        df = haplotype_df.reset_index(drop=True)
-        for i in df.index:
-            if len(df.loc[i, "APA_id_l"])>2:
-                subset_df = pd.DataFrame([df.loc[i, "APA_id_l"], df.loc[i, "A1_APA_l"], df.loc[i, "A2_APA_l"]])
-                subset_df.columns = subset_df.iloc[0]
-                subset_df = subset_df.iloc[1:].reset_index(drop=True)
-                subset_df.index=['A1', 'A2']
-                max_sum_column = subset_df.sum().astype(int).idxmax() # 找出列的总和最大的那个列
-                new_data = {
-                    max_sum_column: subset_df[max_sum_column],
-                    'other': subset_df.drop(columns=[max_sum_column]).sum(axis=1)
-                } # 保留最大列并将其他列合并
-                grouped_df = pd.DataFrame(new_data)
-                df.loc[i, "A1_apa1"] = grouped_df.iloc[0][max_sum_column]
-                df.loc[i, "A2_apa1"] = grouped_df.iloc[1][max_sum_column]
-                df.loc[i, "A1_apa2"] = grouped_df.iloc[0]["other"]
-                df.loc[i, "A2_apa2"] = grouped_df.iloc[1]["other"]
-                df.loc[i, "APA_id_l"] = f'{max_sum_column},other'
-            else:
-                df.loc[i, "A1_apa1"] = df.loc[i, "A1_APA_l"][0]
-                df.loc[i, "A2_apa1"] = df.loc[i, "A2_APA_l"][0]
-                df.loc[i, "A1_apa2"] = df.loc[i, "A1_APA_l"][1]
-                df.loc[i, "A2_apa2"] = df.loc[i, "A2_APA_l"][1]
-                df.loc[i, "APA_id_l"] = ','.join(df.loc[i, "APA_id_l"])
-        del df['A1_APA_l'], df['A2_APA_l']
-        results = df.apply(lambda row: apply_simulate_fisher(row), axis=1, result_type='expand')
-        df[['p_value','beta', 'SE']] = results
-        df = df[df['p_value'].notna()]
+        df = haplotype_df.sort_values(by=['chrom', 'snp_pos_1base'])
+        df = process_all_data(df)
+        df = df.reset_index(drop=True)
         df.to_csv(output_path, index=None)
         print(f"{output_path}已保存")
