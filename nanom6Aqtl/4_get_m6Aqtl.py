@@ -113,44 +113,40 @@ def get_haplotypes(snp_base, m6A_readid, unm6A_readid, snp_file_dict_res):
         return None
 
 
-def analyze_snp_methylation_bayes(A1_A, A2_A, A1_m6A, A2_m6A, n_samples=10000000, random_state=42, effect_size_threshold=0.1):
-    if A1_A>0 and A2_A>0 and A1_m6A>0 and A2_m6A>0:
+def analyze_snp_methylation_bayes(A1_A, A2_A, A1_m6A, A2_m6A, n_samples=10000000, random_state=42):
+    if A1_A>0 and A2_A>0 and A1_m6A>0 and A2_m6A>0 and (A1_A+A2_A+A1_m6A+A2_m6A)>20:
         # 使用Beta分布作为先验和后验
         post_alpha_ref = 1 + A1_m6A
         post_beta_ref = 1 + A1_A
         post_alpha_alt = 1 + A2_m6A
         post_beta_alt = 1 + A2_A
-        observed_theta_alt = A2_m6A/(A2_m6A+A2_A)
-        observed_theta_ref = A1_m6A/(A1_m6A+A1_A)
-
         # 设置随机种子
         rng = np.random.default_rng(random_state)
-        # 计算观测差异
-        observed_diff = abs(observed_theta_alt - observed_theta_ref)
-        # 在H0假设下，从后验分布中抽样 (θ = 0)
-        theta_ref_samples_H0 = stats.beta.rvs(post_alpha_ref, post_beta_ref, size=n_samples, random_state=rng)
-        theta_alt_samples_H0 = theta_ref_samples_H0  # 在H0假设下，θ相等
-        # 在H1假设下，从后验分布中抽样 (θ ≠ 0)
-        theta_ref_samples_H1 = stats.beta.rvs(post_alpha_ref, post_beta_ref, size=n_samples, random_state=rng)
-        theta_alt_samples_H1 = stats.beta.rvs(post_alpha_alt, post_beta_alt, size=n_samples, random_state=rng)
-        # 计算差异
-        diff_samples_H0 = np.abs(theta_alt_samples_H0 - theta_ref_samples_H0)
-        diff_samples_H1 = np.abs(theta_alt_samples_H1 - theta_ref_samples_H1)
-        # 计算边际后验概率 P(H0 | 数据):实际观测差异大于等于在H0假设下的模拟差异的概率
-        posterior_prob_H0 = np.mean(diff_samples_H0 >= observed_diff)
-        # 计算beta (β)
-        beta = observed_theta_alt - observed_theta_ref
-        # 计算标准误差 (SE)
-        se = np.std(diff_samples_H1)
-        return posterior_prob_H0, beta, se
+        # 从后验分布中抽样
+        theta_ref_samples = stats.beta.rvs(post_alpha_ref, post_beta_ref, size=n_samples, random_state=rng)
+        theta_alt_samples = stats.beta.rvs(post_alpha_alt, post_beta_alt, size=n_samples, random_state=rng)
+        # 计算效应大小
+        effect_size = np.mean(theta_ref_samples - theta_alt_samples)
+        # 计算 beta（标准化效应大小）
+        pooled_sd = np.sqrt((np.var(theta_ref_samples) + np.var(theta_alt_samples)) / 2)
+        beta = effect_size / pooled_sd
+        # 计算 beta 的标准误
+        se = np.std(theta_ref_samples - theta_alt_samples) / pooled_sd
+        # 计算 z 分数
+        z_score = beta / se
+        # 计算传统p值（双侧）
+        p_value = 2 * (1 - stats.norm.cdf(abs(z_score)))
+        return p_value, z_score, beta, se
     else:
-        return None, None, None
+        return None, None, None, None
 
 
 def process_all_data(df):
     results = df.apply(lambda row: analyze_snp_methylation_bayes(row['A1_A'], row['A2_A'], row['A1_m6A'], row['A2_m6A']), axis=1)
-    df['p_value'],df['beta'],df['SE'] = zip(*results)
+    df['p_value'],df['z_score'],df['beta'],df['SE'] = zip(*results)
     df = df[(df['p_value'].notna())]
+    if len(df) == 0:
+        return None
     df['FDR'] = multipletests(df['p_value'], method='fdr_bh')[1]
     return df
 
@@ -207,6 +203,9 @@ if __name__ == "__main__":
     if len(haplotype_df) != 0:
         df = haplotype_df.sort_values(by=['chrom', 'snp_pos_1base', 'm6A_pos_1base'])
         df = process_all_data(df)
+        if df is None:
+            print(f"{args.chrom} {args.strand}中的SNP没有足够的read覆盖度，无法进行统计")
+            exit()
         df = df.reset_index(drop=True)
         df.to_csv(output_path, index=None)
         print(f"{output_path}已保存")
