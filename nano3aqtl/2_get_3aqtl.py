@@ -62,7 +62,8 @@ def start_get_haplotypes(chrom,snp_bases,read_APA_dict,snp_file_dict):
         snp_base_filter = {key: value for key, value in snp_base.items() if key in read_APA_dict}
         if len(snp_base_filter) == 0:
             continue # 说明这个snp覆盖的read没有明确的APA分类
-        res = get_haplotypes_fourfold(snp_base_filter, read_APA_dict, snp_file_dict[snp_pos])
+        # res = get_haplotypes_fourfold(snp_base_filter, read_APA_dict, snp_file_dict[snp_pos])
+        res = get_haplotypes_Multidimensional(snp_base_filter, read_APA_dict, snp_file_dict[snp_pos])
         if res is not None:
             A1,A2,A1_count_l,A2_count_l,all_APA_type,snpID,eaf = res
             res_l.append([A1,A2,A1_count_l,A2_count_l,all_APA_type,snpID,eaf,snp_pos])
@@ -132,28 +133,82 @@ def analyze_snp_methylation_bayes_fourfold(A1_APA_count, A2_APA_count, n_samples
         # 从后验分布中抽样
         theta_ref_samples = stats.beta.rvs(post_alpha_ref, post_beta_ref, size=n_samples, random_state=rng)
         theta_alt_samples = stats.beta.rvs(post_alpha_alt, post_beta_alt, size=n_samples, random_state=rng)
-        # 计算差异
-        diff_samples = theta_alt_samples - theta_ref_samples
-        # 计算后验概率
-        posterior_prob = np.mean(diff_samples > 0)
-        # 计算等效的p值
-        p_value = 2 * min(posterior_prob, 1 - posterior_prob)
-        # 计算beta (β)
-        beta = np.mean(diff_samples)
-        # 计算标准误差 (SE)
-        se = np.std(diff_samples)
-        return p_value, posterior_prob, beta, se
+        # 计算效应大小
+        effect_size = np.mean(theta_ref_samples - theta_alt_samples)
+        # 计算 beta（标准化效应大小）
+        pooled_sd = np.sqrt((np.var(theta_ref_samples) + np.var(theta_alt_samples)) / 2)
+        beta = effect_size / pooled_sd
+        # 计算 beta 的标准误
+        se = np.std(theta_ref_samples - theta_alt_samples) / pooled_sd
+        # 计算 z 分数
+        z_score = beta / se
+        # 计算传统p值（双侧）
+        p_value = 2 * (1 - stats.norm.cdf(abs(z_score)))
+        return p_value, z_score, beta, se
     else:
         return None, None, None, None
 
 
-def process_all_data(df):
-    results = df.apply(lambda row: analyze_snp_methylation_bayes_fourfold(row['A1_count_l'], row['A2_count_l']), axis=1)
-    df['p_value'],df['posterior_prob'],df['beta'],df['SE'] = zip(*results)
+def process_all_data_fourfold(df):
+    results = df.apply(lambda row: analyze_snp_methylation_bayes_fourfold(row['A1_APA_count'], row['A2_APA_count']), axis=1)
+    df['p_value'],df['z_score'],df['beta'],df['SE'] = zip(*results)
     df = df[(df['p_value'].notna())]
+    if len(df) == 0:
+        return None
     df['FDR'] = multipletests(df['p_value'], method='fdr_bh')[1]
     return df
 
+
+def analyze_snp_methylation_bayes_Multidimensional(A1_counts, A2_counts, APA_types, n_samples=10000000, random_state=42):
+    A1_counts = np.array(A1_counts)
+    A2_counts = np.array(A2_counts)
+    # 检查总样本量和非零类别数
+    total_count = np.sum(A1_counts) + np.sum(A2_counts)
+    non_zero_categories = np.sum((A1_counts > 0) & (A2_counts > 0))
+    if (total_count > 20) & (non_zero_categories >= 2):
+        # 设置无信息先验 Dirichlet分布
+        Dirichlet_prior = np.ones_like(A1_counts)
+        # 计算后验参数
+        A1_posterior = Dirichlet_prior + A1_counts
+        A2_posterior = Dirichlet_prior + A2_counts
+        # 设置随机种子
+        rng = np.random.default_rng(random_state)
+        # 从后验分布中抽样
+        A1_samples = rng.dirichlet(A1_posterior, size=n_samples)
+        A2_samples = rng.dirichlet(A2_posterior, size=n_samples)
+        # 计算效应大小（各类别比例的差异）
+        effect_sizes = A1_samples - A2_samples
+        # 计算平均效应大小
+        mean_effect = np.mean(effect_sizes, axis=0)
+        # 计算合并标准差
+        pooled_sd = np.sqrt((np.var(A1_samples, axis=0) + np.var(A2_samples, axis=0)) / 2)
+        # 标准化效应大小 (beta)
+        beta = mean_effect / pooled_sd
+        # 计算标准误
+        se = np.std(effect_sizes, axis=0) / pooled_sd
+        # 计算 Z 分数
+        z_score = beta / se
+        # 计算 p 值（双侧）
+        p_values = 2 * (1 - stats.norm.cdf(np.abs(z_score)))
+        # 得到overall_p_value对应的结果
+        signal_p_value = np.min(p_values)
+        signal_z_score = z_score[np.argmin(p_values)]
+        signal_beta = beta[np.argmin(p_values)]
+        signal_se = se[np.argmin(p_values)]
+        signal_APA = APA_types[np.argmin(p_values)]
+        return signal_p_value, signal_z_score, signal_beta, signal_se, signal_APA, list(p_values)
+    else:
+        return None, None, None, None, None, None
+
+
+def process_all_data_Multidimensional(df):
+    results = df.apply(lambda row: analyze_snp_methylation_bayes_Multidimensional(row['A1_APA_count'], row['A2_APA_count'], row['APA_id']), axis=1)
+    df['signal_pvalue'],df['signal_z_score'],df['signal_beta'],df['signal_SE'],df['signal_APA_type'],df['All_pvalues'] = zip(*results)
+    df = df[(df['signal_pvalue'].notna())]
+    if len(df) == 0:
+        return None
+    df['FDR'] = multipletests(df['signal_pvalue'], method='fdr_bh')[1]
+    return df
 
 
 if __name__ == "__main__":
@@ -197,7 +252,11 @@ if __name__ == "__main__":
     haplotype_df = pd.concat([haplotype_df, count_haplotype(args.chrom, end, args.strand, args.bam, df_dict, snp_dict, args.threads, base_minQ, read_minQ)],ignore_index=True)
     if len(haplotype_df) != 0:
         df = haplotype_df.sort_values(by=['chrom', 'snp_pos_1base'])
-        df = process_all_data(df)
+        # df = process_all_data_fourfold(df)
+        df = process_all_data_Multidimensional(df)
+        if df is None:
+            print(f'{args.chrom} {args.strand}中的SNP没有足够的read覆盖度，无法进行统计')
+            exit()
         df = df.reset_index(drop=True)
         df.to_csv(output_path, index=None)
         print(f"{output_path}已保存")
