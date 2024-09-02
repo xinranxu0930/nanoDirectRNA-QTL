@@ -1,208 +1,315 @@
 import pandas as pd
 import pysam
-import scipy
 import argparse
-import pickle
 from collections import Counter
-import os
-from scipy.stats import fisher_exact
 import numpy as np
-import ast
+from statsmodels.stats.multitest import multipletests
+from scipy import stats
+import pickle
 
-def get_reverse_complementary_sequence(seq):
-    seqreverse = seq[::-1]
-    transtable = str.maketrans('ATGCatgc','TACGtacg')
-    finalseq = seqreverse.translate(transtable).upper()
-    return finalseq
 
-def count_haplotype(chrom, end, strand, bamfile, read_isoform_dict, snp_file_dict,threadsnum,base_minQ,read_minQ):
+def count_haplotype(
+    chrom,
+    end,
+    strand,
+    bamfile,
+    read_isoform_dict,
+    snp_file_dict,
+    threadsnum,
+    base_minQ,
+    read_minQ,
+):
     # read_isoform_dict read对应的isoform read:isoform
-    # snp_file_dict snp位点信息 chrom_pos0: rsid;A1;A2;EAF
+    # snp_file_dict snp位点信息 int(pos0): rsid;A1;A2;EAF
     snp_bases = {}
     # snp_bases 存放的是snp位点 [pos0]:{read1:"A",read2:"A",read3:"T"}
-    with pysam.AlignmentFile(bamfile, "rb",threads=threadsnum) as samfile:
-        for pileupcolumn in samfile.pileup(chrom, 0, end,min_base_quality=base_minQ,min_mapping_quality=read_minQ,stepper="samtools",max_depth=50000):
-            base_pos = str(pileupcolumn.reference_pos)
+    with pysam.AlignmentFile(bamfile, "rb", threads=threadsnum) as samfile:
+        for pileupcolumn in samfile.pileup(
+            chrom,
+            0,
+            end,
+            min_base_quality=base_minQ,
+            min_mapping_quality=read_minQ,
+            stepper="samtools",
+            max_depth=5000000,
+        ):
+            base_pos = pileupcolumn.reference_pos
             ## 处理snp位点的情况
             # 1判断位置是否是snp
-            if f"{chrom}_{base_pos}" in snp_file_dict:
+            if base_pos in snp_file_dict:
                 # 2判断是否是杂合子位点
-                seqs = [i.upper() for i in pileupcolumn.get_query_sequences()]  # 被覆盖位点处的所有碱基
-                if len(set(seqs)) > 1:
+                seqs = [i.upper() for i in pileupcolumn.get_query_sequences()]
+                if len(set([seq for seq in seqs if seq])) > 1:
                     snp_bases[base_pos] = {
                         i: j for i, j in zip(pileupcolumn.get_query_names(), seqs)
                     }
     if len(snp_bases) == 0:
-        print(f'{chrom} {strand}中,没有snp被覆盖')
+        print(f"{chrom} {strand}中,没有杂合的snp被read覆盖")
         return None
     haplotype_df = pd.DataFrame(
         columns=[
-        "chrom","strand","snp_pos_1base",
-        "rsID","A1","A2",
-        "A1_isoform_l","A2_isoform_l",
-        "isoform_id_l",
-        "EAF",
-        ])
-    result = start_get_haplotypes(chrom, strand, snp_bases, read_isoform_dict, snp_file_dict)
+            "chrom",
+            "strand",
+            "snp_pos_1base",
+            "rsID",
+            "A1",
+            "A2",
+            "EAF",
+            "A1_isoform_count",
+            "A2_isoform_count",
+            "isoform_id",
+        ]
+    )
+    result = start_get_haplotypes(snp_bases, read_isoform_dict, snp_file_dict)
     if result is None:
-        print(f'{chrom} {strand}中没有符合条件的snp')
+        print(f"{chrom} {strand}中没有符合条件的snp")
         return None
     else:
         ith = 0
         for i in result:
             haplotype_df.loc[ith] = (
-                chrom,strand,int(i[7])+1,
-                i[5],i[0],i[1],
-                i[2],i[3],
+                chrom,
+                strand,
+                i[7] + 1,
+                i[5],
+                i[0],
+                i[1],
+                i[6],
+                i[2],
+                i[3],
                 i[4],
-                i[6]
             )
             ith += 1
         return haplotype_df
 
-def start_get_haplotypes(chrom,strand,snp_bases,read_isoform_dict,snp_file_dict):
-    res_l = [] # 每一个元素都表示一个snp的结果 [snp_genome_0base,A1,A2,A1_l,A2_l,isoform_l]
+
+def start_get_haplotypes(snp_bases, read_isoform_dict, snp_file_dict):
+    res_l = []
     # snp_bases [pos0]:{read1:"A",read2:"A",read3:"T"}
     # read_isoform_dict read:isoform
     for snp_pos, snp_base in snp_bases.items():
-        readid_base_isoform = [] # 每一个新的snp都有一个新的readid_base_isoform，里面是覆盖这个snp的所有read的base和isoform
-        for read,base in snp_base.items():
-            if read not in read_isoform_dict:
-                continue
-            else:
-                readid_base_isoform.append([base,read_isoform_dict[read]]) # 这里是某个snp处的read、base和isoform的对应情况，因为不需要知道具体的read是什么，只要知道base和isoform的对应关系就可以，所以放在list中
-        res = get_haplotypes(readid_base_isoform, snp_file_dict[f"{chrom}_{snp_pos}"],strand)
+        # 筛选出snp覆盖的read中有isoform分类的read
+        snp_base_filter = {
+            key: value for key, value in snp_base.items() if key in read_isoform_dict
+        }
+        if len(snp_base_filter) == 0:
+            continue
+        res = get_haplotypes_Multidimensional(
+            snp_base_filter, read_isoform_dict, snp_file_dict[snp_pos]
+        )
         if res is not None:
-            a1,a2,A1_count_l,A2_count_l,all_isoform_type,snpID,eaf = res
-            res_l.append([a1,a2,A1_count_l,A2_count_l,all_isoform_type,snpID,eaf,snp_pos])
+            a1, a2, A1_count_l, A2_count_l, all_isoform_type, snpID, eaf = res
+            res_l.append(
+                [a1, a2, A1_count_l, A2_count_l, all_isoform_type, snpID, eaf, snp_pos]
+            )
     if len(res_l) != 0:
         return res_l
     else:
         return None
 
-def get_haplotypes(readid_base_isoform,snp_file_dict_res,strand):
-    if len(readid_base_isoform) == 0:
-        return None
-    snpID = snp_file_dict_res.split(";")[0]
-    eaf = float(snp_file_dict_res.split(";")[3])
-    all_base_list = list(i[0] for i in readid_base_isoform)
-    all_isoform_type = list(set(i[1] for i in readid_base_isoform))
-    A1,A2 = snp_file_dict_res.split(";")[1],snp_file_dict_res.split(";")[2]
-    a1,a2 = "",""
-    if strand == "-":
-        A1 = get_reverse_complementary_sequence(A1)
-        A2 = get_reverse_complementary_sequence(A2)
-    for base in all_base_list:
-        if base == A1:
-            a1 = base
-        elif base == A2:
-            a2 = base
-    if (a1 == "") and (a2 == ""):
-        return None
-    # 遍历all_isoform_type列表
-    A1_count_l, A2_count_l = [], []
-    if a2 != "" and a1 != "":
-        A1_count_l = [sum(1 for base_isoform in readid_base_isoform if base_isoform[0] == a1 and base_isoform[1] == isoform) for isoform in all_isoform_type]
-        A2_count_l = [sum(1 for base_isoform in readid_base_isoform if base_isoform[0] == a2 and base_isoform[1] == isoform) for isoform in all_isoform_type]
-    elif a2 == "":
-        A1_count_l = [sum(1 for base_isoform in readid_base_isoform if base_isoform[0] == a1 and base_isoform[1] == isoform) for isoform in all_isoform_type]
-        A2_count_l = [0 for _ in range(len(all_isoform_type))]
-    else:
-        A2_count_l = [sum(1 for base_isoform in readid_base_isoform if base_isoform[0] == a2 and base_isoform[1] == isoform) for isoform in all_isoform_type]
-        A1_count_l = [0 for _ in range(len(all_isoform_type))]
-    return a1,a2,A1_count_l,A2_count_l,all_isoform_type,snpID,eaf
 
-# fisher
-def simulate_fisher_exact_se(A1_isoform1, A2_isoform1, A1_isoform2, A2_isoform2):
-    A1_isoform1 += 0.75 if A1_isoform1 == 0 else 0
-    A2_isoform1 += 0.75 if A2_isoform1 == 0 else 0
-    A1_isoform2 += 0.75 if A1_isoform2 == 0 else 0
-    A2_isoform2 += 0.75 if A2_isoform2 == 0 else 0
-    observed = np.array([[A1_isoform1, A2_isoform1], [A1_isoform2, A2_isoform2]])
-    odds_ratio = (A1_isoform1 * A2_isoform2) / (A2_isoform1 * A1_isoform2)
-    se_log_or = np.sqrt(1/A1_isoform1 + 1/A2_isoform2 + 1/A2_isoform1 + 1/A1_isoform2)
-    p_value = fisher_exact(observed)[1]
-    if np.isinf(odds_ratio) or odds_ratio == 0:
-        beta = None
-    else:
-        beta = np.log(odds_ratio)
-    return p_value, beta, se_log_or
+def get_haplotypes_Multidimensional(snp_base, read_isoform_dict, snp_file_dict_res):
+    snpID, A1, A2, eaf = snp_file_dict_res.split(";")[:4]
+    eaf = float(eaf)
+    A1_read = set(k for k, v in snp_base.items() if v == A1)
+    A2_read = set(k for k, v in snp_base.items() if v == A2)
+    if A1_read and A2_read:
+        A1_ir = Counter(
+            read_isoform_dict[read_id]
+            for read_id in A1_read
+            if read_id in read_isoform_dict
+        )
+        A2_ir = Counter(
+            read_isoform_dict[read_id]
+            for read_id in A2_read
+            if read_id in read_isoform_dict
+        )
+        all_ir_types = set(A1_ir.keys()) | set(A2_ir.keys())
+        data = {
+            "A1": [A1_ir.get(ir, 0) for ir in all_ir_types],
+            "A2": [A2_ir.get(ir, 0) for ir in all_ir_types],
+        }
+        df = pd.DataFrame(data, index=list(all_ir_types))
+        if len(df) == 1:
+            return None
+        else:
+            return (
+                A1,
+                A2,
+                df["A1"].tolist(),
+                df["A2"].tolist(),
+                df.index.tolist(),
+                snpID,
+                eaf,
+            )
 
-def apply_simulate_fisher(row):
-    return simulate_fisher_exact_se(row['A1_isoform1'], row['A2_isoform1'], row['A1_isoform2'], row['A2_isoform2'])
+
+def analyze_snp_methylation_bayes_Multidimensional(
+    A1_counts, A2_counts, isoform_types, n_samples=10000000, random_state=42
+):
+    A1_counts = np.array(A1_counts)
+    A2_counts = np.array(A2_counts)
+    # 检查总样本量和非零类别数
+    total_count = np.sum(A1_counts) + np.sum(A2_counts)
+    non_zero_categories = np.sum((A1_counts > 0) & (A2_counts > 0))
+    if (total_count > 20) & (non_zero_categories >= 2):
+        # 设置无信息先验 Dirichlet分布
+        Dirichlet_prior = np.ones_like(A1_counts)
+        # 计算后验参数
+        A1_posterior = Dirichlet_prior + A1_counts
+        A2_posterior = Dirichlet_prior + A2_counts
+        # 设置随机种子
+        rng = np.random.default_rng(random_state)
+        # 从后验分布中抽样
+        A1_samples = rng.dirichlet(A1_posterior, size=n_samples)
+        A2_samples = rng.dirichlet(A2_posterior, size=n_samples)
+        # 计算效应大小（各类别比例的差异）
+        effect_sizes = A1_samples - A2_samples
+        # 计算平均效应大小
+        mean_effect = np.mean(effect_sizes, axis=0)
+        # 计算合并标准差
+        pooled_sd = np.sqrt(
+            (np.var(A1_samples, axis=0) + np.var(A2_samples, axis=0)) / 2
+        )
+        # 标准化效应大小 (beta)
+        beta = mean_effect / pooled_sd
+        # 计算标准误
+        se = np.std(effect_sizes, axis=0) / pooled_sd
+        # 计算 Z 分数
+        z_score = beta / se
+        # 计算 p 值（双侧）
+        p_values = 2 * (1 - stats.norm.cdf(np.abs(z_score)))
+        # 得到overall_p_value对应的结果
+        signal_p_value = np.min(p_values)
+        signal_z_score = z_score[np.argmin(p_values)]
+        signal_beta = beta[np.argmin(p_values)]
+        signal_se = se[np.argmin(p_values)]
+        signal_isoform = isoform_types[np.argmin(p_values)]
+        return (
+            signal_p_value,
+            signal_z_score,
+            signal_beta,
+            signal_se,
+            signal_isoform,
+            list(p_values),
+        )
+    else:
+        return None, None, None, None, None, None
+
+
+def process_all_data_Multidimensional(df):
+    results = df.apply(
+        lambda row: analyze_snp_methylation_bayes_Multidimensional(
+            row["A1_isoform_count"], row["A2_isoform_count"], row["isoform_id"]
+        ),
+        axis=1,
+    )
+    (
+        df["signal_pvalue"],
+        df["signal_z_score"],
+        df["signal_beta"],
+        df["signal_SE"],
+        df["signal_isoform_type"],
+        df["All_pvalues"],
+    ) = zip(*results)
+    df = df[(df["signal_pvalue"].notna())]
+    if len(df) == 0:
+        return None
+    df["FDR"] = multipletests(df["signal_pvalue"], method="fdr_bh")[1]
+    return df
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Nanopore direct RNA data call isoform rato qtl(irqtl).')
-    parser.add_argument("-b","--bam", type=str, help="bam file path")
+    parser = argparse.ArgumentParser(
+        description="Nanopore direct RNA data call isoform rato QTL(irQTL)."
+    )
+    parser.add_argument("-b", "--bam", type=str, help="bam file path")
     parser.add_argument("--snp_info", type=str, help="processed snp pkl file path")
-    parser.add_argument("-p","--outdirpre", type=str, help="outdir and pre")
-    parser.add_argument("-r","--read_isoform_dict", type=str, help="read isoform pkl file path")
-    parser.add_argument("-c","--chrom", type=str, help="chromosome")
-    parser.add_argument("-s","--strand", type=str, help="different strand processing")
+    parser.add_argument("-o", "--outdirpre", type=str, help="outdir and pre")
+    parser.add_argument(
+        "-r", "--read_isoform_dict", type=str, help="read isoform pkl file path"
+    )
+    parser.add_argument("-c", "--chrom", type=str, help="chromosome")
+    parser.add_argument("-s", "--strand", type=str, help="different strand processing")
     parser.add_argument("--geno_size", type=str, help="genome size file path")
-    parser.add_argument("-t","--threads", type=int, default=4, help="threads number (default: 4)")
-    parser.add_argument("--base_minQ", type=int, default=5, help="base min qscore(default=5)")
-    parser.add_argument("--read_minQ", type=int, default=0, help="read min qscore(default=0)")
+    parser.add_argument(
+        "-t", "--threads", type=int, default=4, help="threads number (default: 4)"
+    )
+    parser.add_argument(
+        "--base_minQ", type=int, default=5, help="base min qscore(default=5)"
+    )
+    parser.add_argument(
+        "--read_minQ", type=int, default=0, help="read min qscore(default=0)"
+    )
     args = parser.parse_args()
 
     output_path = f"{args.outdirpre}_haplotype_{args.chrom}_{args.strand}_tmp.csv"
 
-    base_minQ = args.base_minQ-1
-    read_minQ = args.read_minQ-1
+    base_minQ = args.base_minQ - 1 if args.base_minQ != 0 else 0
+    read_minQ = args.read_minQ - 1 if args.read_minQ != 0 else 0
 
-    with open(args.read_isoform_dict, 'rb') as file:
-        read_isoform_dict = pickle.load(file) # readID: isoformID
+    with open(args.read_isoform_dict, "rb") as file:
+        read_isoform_dict = pickle.load(file)  # readID: isoformID
 
     snp_info = pd.read_csv(args.snp_info, sep="\t")
-    snp_info.columns = ["chrom","pos1","rsID","A1","A2","EAF"]
+    snp_info.columns = ["chrom", "pos1", "rsID", "A1", "A2", "EAF"]
+    snp_info = snp_info[snp_info["chrom"] == args.chrom]
     snp_info["pos0"] = snp_info["pos1"].astype(int) - 1
-    snp_info["k"] = snp_info["chrom"] + "_" + snp_info["pos0"].astype(str)
-    snp_info["v"] = snp_info["rsID"] + ";" + snp_info["A1"] + ";" + snp_info["A2"] + ";" + snp_info["EAF"].astype(str)
-    snp_dict = dict(zip(snp_info["k"], snp_info["v"])) # chrom_pos0: rsid;A1;A2;EAF
+    snp_info["v"] = (
+        snp_info["rsID"]
+        + ";"
+        + snp_info["A1"]
+        + ";"
+        + snp_info["A2"]
+        + ";"
+        + snp_info["EAF"].astype(str)
+    )
+    snp_dict = dict(zip(snp_info["pos0"], snp_info["v"]))  # pos0: rsid;A1;A2;EAF
 
-    geno_size_df = pd.read_csv(args.geno_size, sep="\t", header=None, names=["chrom","size"])
+    geno_size_df = pd.read_csv(
+        args.geno_size, sep="\t", header=None, names=["chrom", "size"]
+    )
     geno_size_dict = dict(zip(geno_size_df["chrom"], geno_size_df["size"]))
-    haplotype_df = pd.DataFrame(columns=[
-        "chrom","strand","snp_pos_1base",
-        "rsID","A1","A2",
-        "A1_isoform_l","A2_isoform_l",
-        "isoform_id_l",
-        "EAF",
-        ])
+    haplotype_df = pd.DataFrame(
+        columns=[
+            "chrom",
+            "strand",
+            "snp_pos_1base",
+            "rsID",
+            "A1",
+            "A2",
+            "EAF",
+            "A1_isoform_count",
+            "A2_isoform_count",
+            "isoform_id",
+        ]
+    )
     end = geno_size_dict[args.chrom]
-    haplotype_df = pd.concat([haplotype_df, count_haplotype(args.chrom, end, args.strand, args.bam, read_isoform_dict, snp_dict, args.threads, base_minQ, read_minQ)],ignore_index=True)
-    # haplotype_df = haplotype_df[haplotype_df['A1'].notnull() & haplotype_df['A2'].notnull()]
+    haplotype_df = pd.concat(
+        [
+            haplotype_df,
+            count_haplotype(
+                args.chrom,
+                end,
+                args.strand,
+                args.bam,
+                read_isoform_dict,
+                snp_dict,
+                args.threads,
+                base_minQ,
+                read_minQ,
+            ),
+        ],
+        ignore_index=True,
+    )
     if len(haplotype_df) != 0:
-        haplotype_df = haplotype_df[haplotype_df['isoform_id_l'].str.len() != 1] # 删除df['isoform_id_l']中长度为1的行
-        haplotype_df = haplotype_df[(haplotype_df['A1'] != '') & (haplotype_df['A2'] != '')] # df['A1']和df['A2']只要有一个是None 就删除这一行
-        df = haplotype_df.reset_index(drop=True)
-        for i in df.index:
-            if len(df.loc[i, "isoform_id_l"])>2:
-                subset_df = pd.DataFrame([df.loc[i, "isoform_id_l"], df.loc[i, "A1_isoform_l"], df.loc[i, "A2_isoform_l"]])
-                subset_df.columns = subset_df.iloc[0]
-                subset_df = subset_df.iloc[1:].reset_index(drop=True)
-                subset_df.index=['A1', 'A2']
-                max_sum_column = subset_df.sum().astype(int).idxmax() # 找出列的总和最大的那个列
-                new_data = {
-                    max_sum_column: subset_df[max_sum_column],
-                    'other': subset_df.drop(columns=[max_sum_column]).sum(axis=1)
-                } # 保留最大列并将其他列合并
-                grouped_df = pd.DataFrame(new_data)
-                df.loc[i, "A1_isoform1"] = grouped_df.iloc[0][max_sum_column]
-                df.loc[i, "A2_isoform1"] = grouped_df.iloc[1][max_sum_column]
-                df.loc[i, "A1_isoform2"] = grouped_df.iloc[0]["other"]
-                df.loc[i, "A2_isoform2"] = grouped_df.iloc[1]["other"]
-                df.loc[i, "isoform_id_l"] = f'{max_sum_column},other'
-            else:
-                df.loc[i, "A1_isoform1"] = df.loc[i, "A1_isoform_l"][0]
-                df.loc[i, "A2_isoform1"] = df.loc[i, "A2_isoform_l"][0]
-                df.loc[i, "A1_isoform2"] = df.loc[i, "A1_isoform_l"][1]
-                df.loc[i, "A2_isoform2"] = df.loc[i, "A2_isoform_l"][1]
-                df.loc[i, "isoform_id_l"] = ','.join(df.loc[i, "isoform_id_l"])
-        del df['A1_isoform_l'], df['A2_isoform_l']
-        results = df.apply(lambda row: apply_simulate_fisher(row), axis=1, result_type='expand')
-        df[['p_value','beta', 'SE']] = results
-        df = df[df['p_value'].notna()]
+        df = haplotype_df.sort_values(by=["chrom", "snp_pos_1base"])
+        df = process_all_data_Multidimensional(df)
+        if df is None:
+            print(
+                f"{args.chrom} {args.strand}中的SNP没有足够的read覆盖度，无法进行统计"
+            )
+            exit()
+        df = df.reset_index(drop=True)
         df.to_csv(output_path, index=None)
         print(f"{output_path}已保存")

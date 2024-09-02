@@ -147,6 +147,8 @@ def process_all_data(df):
     results = df.apply(lambda row: analyze_snp_methylation_bayes(row['A1_U'], row['A2_U'], row['A1_pseU'], row['A2_pseU']), axis=1)
     df['p_value'],df['z_score'],df['beta'],df['SE'] = zip(*results)
     df = df[(df['p_value'].notna())]
+    if len(df) == 0:
+        return None
     df['FDR'] = multipletests(df['p_value'], method='fdr_bh')[1]
     return df
 
@@ -204,6 +206,9 @@ if __name__ == "__main__":
     if len(haplotype_df) != 0:
         df = haplotype_df.sort_values(by=['chrom', 'snp_pos_1base', 'pseU_pos_1base'])
         df = process_all_data(df)
+        if df is None:
+            print(f"{args.chrom} {args.strand}中的SNP没有足够的read覆盖度，无法进行统计")
+            exit()
         df = df.reset_index(drop=True)
         df.to_csv(output_path, index=None)
         print(f"{output_path}已保存")
